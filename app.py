@@ -249,20 +249,42 @@ LIMIT 2000 OFFSET {offset}"""
 # Data fetching with caching
 # ============================================================
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching session data from DB...")
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_sessions(date_start: str, date_end: str) -> pd.DataFrame:
-    """Fetch raw session data from Metabase (DB 166)."""
-    sql = session_sql(date_start, date_end)
-    df = paginated_query(DB_RING, sql)
-    if not df.empty:
-        for col in ["total_hands", "low_opponent_hands", "sd_hu_hands", "nsd_hu_hands"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-        for col in ["total_profit_loss_bb", "sd_hu_profit_bb", "nsd_hu_profit_bb", "median_hand_time"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["session_start"] = pd.to_datetime(df["session_start"])
-        df["session_end"] = pd.to_datetime(df["session_end"])
-        df["session_date"] = df["session_start"].dt.date
-        df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
+    """Fetch raw session data from Metabase (DB 166), one day at a time."""
+    from datetime import datetime, timedelta as td
+
+    start = datetime.strptime(date_start, "%Y-%m-%d").date()
+    end = datetime.strptime(date_end, "%Y-%m-%d").date()
+    num_days = (end - start).days
+    if num_days <= 0:
+        return pd.DataFrame()
+
+    all_dfs = []
+    progress = st.progress(0, text="Fetching session data...")
+    for i in range(num_days):
+        day = start + td(days=i)
+        day_start = day.strftime("%Y-%m-%d")
+        day_end = (day + td(days=1)).strftime("%Y-%m-%d")
+        progress.progress((i) / num_days, text=f"Fetching sessions: day {i+1}/{num_days} ({day_start})...")
+        sql = session_sql(day_start, day_end)
+        day_df = paginated_query(DB_RING, sql)
+        if not day_df.empty:
+            all_dfs.append(day_df)
+    progress.progress(1.0, text="Session data loaded!")
+
+    if not all_dfs:
+        return pd.DataFrame()
+
+    df = pd.concat(all_dfs, ignore_index=True)
+    for col in ["total_hands", "low_opponent_hands", "sd_hu_hands", "nsd_hu_hands"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    for col in ["total_profit_loss_bb", "sd_hu_profit_bb", "nsd_hu_profit_bb", "median_hand_time"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["session_start"] = pd.to_datetime(df["session_start"])
+    df["session_end"] = pd.to_datetime(df["session_end"])
+    df["session_date"] = df["session_start"].dt.date
+    df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
     return df
 
 
@@ -517,7 +539,7 @@ with st.sidebar.expander("Win Rate Scoring Buckets", expanded=False):
     bucket_data = pd.DataFrame(
         [{"From (BB/100)": b[0], "To (BB/100)": b[1], "Score": b[2]} for b in DEFAULT_WR_BUCKETS]
     )
-    edited_buckets = st.data_editor(bucket_data, num_rows="fixed", use_container_width=True, key="wr_buckets")
+    edited_buckets = st.data_editor(bucket_data, num_rows="fixed", width="stretch", key="wr_buckets")
     wr_buckets = [(row["From (BB/100)"], row["To (BB/100)"], row["Score"]) for _, row in edited_buckets.iterrows()]
 
 # Level Thresholds
@@ -691,7 +713,7 @@ format_dict = {
 
 styled = table_df.style.format(format_dict, na_rep="—").map(colour_level, subset=["Level"])
 
-st.dataframe(styled, use_container_width=True, height=600, column_config={
+st.dataframe(styled, width="stretch", height=600, column_config={
     "User ID": st.column_config.NumberColumn(format="%d"),
     "Session ID": st.column_config.TextColumn(),
     "Total Hands": st.column_config.NumberColumn(format="%d"),
