@@ -127,7 +127,7 @@ def paginated_query(database_id: int, sql_template: str, page_size: int = 2000) 
 # ============================================================
 
 def session_sql(date_start: str, date_end: str) -> str:
-    """Session scoring query for DB 166 (ring hand-level data)."""
+    """Session scoring query for DB 166 — optimised: no pagination, median preserved."""
     return f"""WITH game_agg AS (
     SELECT GAME_ID, USER_ID, INTERNAL_REFERENCE_NO,
            MAX(GAME_BIG_BLIND) as big_blind, SUM(WIN - STAKE) as profit_loss,
@@ -187,12 +187,11 @@ SELECT sa.session_id, sa.user_id, sa.total_hands, sa.low_opponent_hands,
        sa.session_start, sa.session_end
 FROM session_agg sa
 JOIN session_median sm ON sa.session_id = sm.session_id AND sa.user_id = sm.USER_ID
-ORDER BY sa.session_id
-LIMIT 2000 OFFSET {{offset}}"""
+ORDER BY sa.session_id"""
 
 
 def rp_earned_sql(date_start: str, date_end: str) -> str:
-    """RP earned per user per day — DB 67."""
+    """RP earned per user per day — DB 67. No pagination."""
     return f"""SELECT
   rp.USER_ID as user_id,
   DATE(rp.TRANSACTION_DATE) as txn_date,
@@ -202,12 +201,11 @@ INNER JOIN transaction_type tt ON rp.TRANSACTION_TYPE_ID = tt.TRANSACTION_TYPE_I
 WHERE tt.TRANSACTION_DESCRIPTION IN ('LeaderBoard Prize', 'TOURNAMENT_WIN')
   AND rp.TRANSACTION_DATE >= '{date_start}' AND rp.TRANSACTION_DATE < '{date_end}'
 GROUP BY rp.USER_ID, DATE(rp.TRANSACTION_DATE)
-ORDER BY rp.USER_ID
-LIMIT 2000 OFFSET {{offset}}"""
+ORDER BY rp.USER_ID"""
 
 
 def rp_claimed_sql(date_start: str, date_end: str) -> str:
-    """RP claimed per user per day — DB 67."""
+    """RP claimed per user per day — DB 67. No pagination."""
     return f"""SELECT
   USER_ID as user_id,
   DATE(TRANSACTION_DATE) as txn_date,
@@ -216,33 +214,30 @@ FROM reward_store_transaction_history
 WHERE TRANSACTION_STATUS_ID = 352
   AND TRANSACTION_DATE >= '{date_start}' AND TRANSACTION_DATE < '{date_end}'
 GROUP BY USER_ID, DATE(TRANSACTION_DATE)
-ORDER BY USER_ID
-LIMIT 2000 OFFSET {{offset}}"""
+ORDER BY USER_ID"""
 
 
-def rp_earned_lifetime_sql() -> str:
-    """Lifetime RP earned per user — DB 67."""
-    return """SELECT
+def rp_earned_lifetime_sql(user_ids: str) -> str:
+    """Lifetime RP earned — scoped to relevant users only."""
+    return f"""SELECT
   rp.USER_ID as user_id,
   ROUND(SUM(rp.TRANSACTION_AMOUNT), 2) as rp_earned_lifetime
 FROM master_transaction_history_baazirewardpoints rp
 INNER JOIN transaction_type tt ON rp.TRANSACTION_TYPE_ID = tt.TRANSACTION_TYPE_ID
 WHERE tt.TRANSACTION_DESCRIPTION IN ('LeaderBoard Prize', 'TOURNAMENT_WIN')
-GROUP BY rp.USER_ID
-ORDER BY rp.USER_ID
-LIMIT 2000 OFFSET {offset}"""
+  AND rp.USER_ID IN ({user_ids})
+GROUP BY rp.USER_ID"""
 
 
-def rp_claimed_lifetime_sql() -> str:
-    """Lifetime RP claimed per user — DB 67."""
-    return """SELECT
+def rp_claimed_lifetime_sql(user_ids: str) -> str:
+    """Lifetime RP claimed — scoped to relevant users only."""
+    return f"""SELECT
   USER_ID as user_id,
   ROUND(SUM(TRANSACTION_AMOUNT), 2) as rp_claimed_lifetime
 FROM reward_store_transaction_history
 WHERE TRANSACTION_STATUS_ID = 352
-GROUP BY USER_ID
-ORDER BY USER_ID
-LIMIT 2000 OFFSET {offset}"""
+  AND USER_ID IN ({user_ids})
+GROUP BY USER_ID"""
 
 
 # ============================================================
@@ -251,7 +246,7 @@ LIMIT 2000 OFFSET {offset}"""
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_sessions(date_start: str, date_end: str) -> pd.DataFrame:
-    """Fetch raw session data from Metabase (DB 166), one day at a time."""
+    """Fetch session data day-by-day, one API call per day (no pagination)."""
     from datetime import datetime, timedelta as td
 
     start = datetime.strptime(date_start, "%Y-%m-%d").date()
@@ -266,9 +261,9 @@ def fetch_sessions(date_start: str, date_end: str) -> pd.DataFrame:
         day = start + td(days=i)
         day_start = day.strftime("%Y-%m-%d")
         day_end = (day + td(days=1)).strftime("%Y-%m-%d")
-        progress.progress((i) / num_days, text=f"Fetching sessions: day {i+1}/{num_days} ({day_start})...")
+        progress.progress(i / num_days, text=f"Fetching sessions: day {i+1}/{num_days} ({day_start})...")
         sql = session_sql(day_start, day_end)
-        day_df = paginated_query(DB_RING, sql)
+        day_df = metabase_query(DB_RING, sql)
         if not day_df.empty:
             all_dfs.append(day_df)
     progress.progress(1.0, text="Session data loaded!")
@@ -290,9 +285,9 @@ def fetch_sessions(date_start: str, date_end: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching daily RP data...")
 def fetch_rp_daily(date_start: str, date_end: str) -> tuple:
-    """Fetch daily RP earned and claimed from Metabase (DB 67)."""
-    earned = paginated_query(DB_MAIN, rp_earned_sql(date_start, date_end))
-    claimed = paginated_query(DB_MAIN, rp_claimed_sql(date_start, date_end))
+    """Fetch daily RP earned and claimed — single call each, no pagination."""
+    earned = metabase_query(DB_MAIN, rp_earned_sql(date_start, date_end))
+    claimed = metabase_query(DB_MAIN, rp_claimed_sql(date_start, date_end))
     if not earned.empty:
         earned["user_id"] = pd.to_numeric(earned["user_id"], errors="coerce").astype("Int64")
         earned["txn_date"] = pd.to_datetime(earned["txn_date"]).dt.date
@@ -305,10 +300,13 @@ def fetch_rp_daily(date_start: str, date_end: str) -> tuple:
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching lifetime RP data...")
-def fetch_rp_lifetime() -> tuple:
-    """Fetch lifetime RP earned and claimed from Metabase (DB 67)."""
-    earned = paginated_query(DB_MAIN, rp_earned_lifetime_sql())
-    claimed = paginated_query(DB_MAIN, rp_claimed_lifetime_sql())
+def fetch_rp_lifetime(user_ids_list) -> tuple:
+    """Fetch lifetime RP — scoped to session users only for speed."""
+    if not user_ids_list:
+        return pd.DataFrame(), pd.DataFrame()
+    user_ids_str = ",".join(str(uid) for uid in user_ids_list)
+    earned = metabase_query(DB_MAIN, rp_earned_lifetime_sql(user_ids_str))
+    claimed = metabase_query(DB_MAIN, rp_claimed_lifetime_sql(user_ids_str))
     if not earned.empty:
         earned["user_id"] = pd.to_numeric(earned["user_id"], errors="coerce").astype("Int64")
         earned["rp_earned_lifetime"] = pd.to_numeric(earned["rp_earned_lifetime"], errors="coerce")
@@ -322,7 +320,8 @@ def enrich_with_rp(sessions: pd.DataFrame, date_start: str, date_end: str) -> pd
     """Join RP data onto session data."""
     df = sessions.copy()
     rp_earned_daily, rp_claimed_daily = fetch_rp_daily(date_start, date_end)
-    rp_earned_life, rp_claimed_life = fetch_rp_lifetime()
+    unique_users = tuple(df["user_id"].dropna().unique().tolist())
+    rp_earned_life, rp_claimed_life = fetch_rp_lifetime(unique_users)
 
     if not rp_earned_daily.empty:
         df = df.merge(
