@@ -45,22 +45,42 @@ CACHE_TTL = 3600
 def metabase_query(database_id: int, sql: str) -> pd.DataFrame:
     """Execute a native SQL query against Metabase and return a DataFrame."""
     headers = {"x-api-key": METABASE_API_KEY, "Content-Type": "application/json"}
+    url = METABASE_URL.rstrip("/")
     payload = {
         "database": database_id,
         "type": "native",
         "native": {"query": sql},
     }
-    resp = requests.post(
-        f"{METABASE_URL}/api/dataset",
-        json=payload,
-        headers=headers,
-        timeout=300,
-    )
-    resp.raise_for_status()
-    data = resp.json()["data"]
-    cols = [c["name"] for c in data["cols"]]
-    rows = data["rows"]
-    return pd.DataFrame(rows, columns=cols)
+    try:
+        resp = requests.post(
+            f"{url}/api/dataset",
+            json=payload,
+            headers=headers,
+            timeout=300,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.ConnectionError as e:
+        st.error(f"❌ Cannot connect to Metabase at `{url}`. Check METABASE_URL in secrets.")
+        st.stop()
+    except requests.exceptions.Timeout:
+        st.error("❌ Metabase query timed out (>5 min). Try a shorter date range.")
+        st.stop()
+    except requests.exceptions.HTTPError as e:
+        if resp.status_code == 401 or resp.status_code == 403:
+            st.error("❌ Metabase authentication failed. Check METABASE_API_KEY in secrets.")
+        else:
+            st.error(f"❌ Metabase returned HTTP {resp.status_code}: {resp.text[:500]}")
+        st.stop()
+
+    try:
+        data = resp.json()["data"]
+        cols = [c["name"] for c in data["cols"]]
+        rows = data["rows"]
+        return pd.DataFrame(rows, columns=cols)
+    except (KeyError, ValueError) as e:
+        st.error(f"❌ Unexpected Metabase response format: {str(e)}")
+        st.code(resp.text[:1000])
+        st.stop()
 
 
 def paginated_query(database_id: int, sql_template: str, page_size: int = 2000) -> pd.DataFrame:
@@ -497,7 +517,7 @@ low_opp_pct_display = st.sidebar.slider(
 )
 low_opp_pct = low_opp_pct_display / 100.0
 
-min_hands = st.sidebar.number_input("Min Total Hands", min_value=0, value=0, step=1, key="min_hands")
+min_hands = st.sidebar.number_input("Min Total Hands", min_value=0, value=10, step=1, key="min_hands")
 score_not_null = st.sidebar.checkbox("Score not null", value=True, key="score_not_null")
 
 # --- Section 3: Data Extraction Filters ---
