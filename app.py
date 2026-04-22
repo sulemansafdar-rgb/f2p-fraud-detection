@@ -199,7 +199,9 @@ def rp_earned_sql(date_start: str, date_end: str) -> str:
     return f"""SELECT
   rp.USER_ID as user_id,
   DATE(rp.TRANSACTION_DATE) as txn_date,
-  ROUND(SUM(rp.TRANSACTION_AMOUNT), 2) as rp_earned
+  ROUND(SUM(rp.TRANSACTION_AMOUNT), 2) as rp_earned,
+  ROUND(SUM(CASE WHEN tt.TRANSACTION_DESCRIPTION = 'TOURNAMENT_WIN' THEN rp.TRANSACTION_AMOUNT ELSE 0 END), 2) as rp_earned_tourneys,
+  ROUND(SUM(CASE WHEN tt.TRANSACTION_DESCRIPTION = 'LeaderBoard Prize' THEN rp.TRANSACTION_AMOUNT ELSE 0 END), 2) as rp_earned_lbs
 FROM master_transaction_history_baazirewardpoints rp
 INNER JOIN transaction_type tt ON rp.TRANSACTION_TYPE_ID = tt.TRANSACTION_TYPE_ID
 WHERE tt.TRANSACTION_DESCRIPTION IN ('LeaderBoard Prize', 'TOURNAMENT_WIN')
@@ -225,7 +227,9 @@ def rp_earned_lifetime_sql(user_ids: str) -> str:
     """Lifetime RP earned — scoped to relevant users only."""
     return f"""SELECT
   rp.USER_ID as user_id,
-  ROUND(SUM(rp.TRANSACTION_AMOUNT), 2) as rp_earned_lifetime
+  ROUND(SUM(rp.TRANSACTION_AMOUNT), 2) as rp_earned_lifetime,
+  ROUND(SUM(CASE WHEN tt.TRANSACTION_DESCRIPTION = 'TOURNAMENT_WIN' THEN rp.TRANSACTION_AMOUNT ELSE 0 END), 2) as rp_earned_lifetime_tourneys,
+  ROUND(SUM(CASE WHEN tt.TRANSACTION_DESCRIPTION = 'LeaderBoard Prize' THEN rp.TRANSACTION_AMOUNT ELSE 0 END), 2) as rp_earned_lifetime_lbs
 FROM master_transaction_history_baazirewardpoints rp
 INNER JOIN transaction_type tt ON rp.TRANSACTION_TYPE_ID = tt.TRANSACTION_TYPE_ID
 WHERE tt.TRANSACTION_DESCRIPTION IN ('LeaderBoard Prize', 'TOURNAMENT_WIN')
@@ -324,6 +328,8 @@ def fetch_rp_daily(date_start: str, date_end: str) -> tuple:
         earned["user_id"] = pd.to_numeric(earned["user_id"], errors="coerce").astype("Int64")
         earned["txn_date"] = pd.to_datetime(earned["txn_date"]).dt.date
         earned["rp_earned"] = pd.to_numeric(earned["rp_earned"], errors="coerce")
+        earned["rp_earned_tourneys"] = pd.to_numeric(earned["rp_earned_tourneys"], errors="coerce")
+        earned["rp_earned_lbs"] = pd.to_numeric(earned["rp_earned_lbs"], errors="coerce")
     if not claimed.empty:
         claimed["user_id"] = pd.to_numeric(claimed["user_id"], errors="coerce").astype("Int64")
         claimed["txn_date"] = pd.to_datetime(claimed["txn_date"]).dt.date
@@ -342,6 +348,8 @@ def fetch_rp_lifetime(user_ids_list) -> tuple:
     if not earned.empty:
         earned["user_id"] = pd.to_numeric(earned["user_id"], errors="coerce").astype("Int64")
         earned["rp_earned_lifetime"] = pd.to_numeric(earned["rp_earned_lifetime"], errors="coerce")
+        earned["rp_earned_lifetime_tourneys"] = pd.to_numeric(earned["rp_earned_lifetime_tourneys"], errors="coerce")
+        earned["rp_earned_lifetime_lbs"] = pd.to_numeric(earned["rp_earned_lifetime_lbs"], errors="coerce")
     if not claimed.empty:
         claimed["user_id"] = pd.to_numeric(claimed["user_id"], errors="coerce").astype("Int64")
         claimed["rp_claimed_lifetime"] = pd.to_numeric(claimed["rp_claimed_lifetime"], errors="coerce")
@@ -372,13 +380,19 @@ def enrich_with_rp(sessions: pd.DataFrame, date_start: str, date_end: str) -> pd
 
     if not rp_earned_daily.empty:
         df = df.merge(
-            rp_earned_daily.rename(columns={"rp_earned": "rp_earned_day"}),
+            rp_earned_daily.rename(columns={
+                "rp_earned": "rp_earned_day",
+                "rp_earned_tourneys": "rp_earned_day_tourneys",
+                "rp_earned_lbs": "rp_earned_day_lbs",
+            }),
             left_on=["user_id", "session_date"],
             right_on=["user_id", "txn_date"],
             how="left",
         ).drop(columns=["txn_date"], errors="ignore")
     else:
         df["rp_earned_day"] = 0
+        df["rp_earned_day_tourneys"] = 0
+        df["rp_earned_day_lbs"] = 0
 
     if not rp_claimed_daily.empty:
         df = df.merge(
@@ -394,13 +408,17 @@ def enrich_with_rp(sessions: pd.DataFrame, date_start: str, date_end: str) -> pd
         df = df.merge(rp_earned_life, on="user_id", how="left")
     else:
         df["rp_earned_lifetime"] = 0
+        df["rp_earned_lifetime_tourneys"] = 0
+        df["rp_earned_lifetime_lbs"] = 0
 
     if not rp_claimed_life.empty:
         df = df.merge(rp_claimed_life, on="user_id", how="left")
     else:
         df["rp_claimed_lifetime"] = 0
 
-    for col in ["rp_earned_day", "rp_claimed_day", "rp_earned_lifetime", "rp_claimed_lifetime"]:
+    for col in ["rp_earned_day", "rp_earned_day_tourneys", "rp_earned_day_lbs",
+                 "rp_claimed_day", "rp_earned_lifetime", "rp_earned_lifetime_tourneys",
+                 "rp_earned_lifetime_lbs", "rp_claimed_lifetime"]:
         df[col] = df[col].fillna(0)
 
     # Fetch usernames
@@ -751,7 +769,10 @@ display_cols = [
     "session_date", "session_start", "session_end",
     "total_hands", "median_hand_time", "win_rate", "total_profit_loss_bb",
     "win_rate_non_showdown_heads_up", "win_rate_showdown_heads_up",
-    "rp_earned_day", "rp_claimed_day", "rp_earned_lifetime", "rp_claimed_lifetime",
+    "rp_earned_day", "rp_earned_day_tourneys", "rp_earned_day_lbs",
+    "rp_claimed_day",
+    "rp_earned_lifetime", "rp_earned_lifetime_tourneys", "rp_earned_lifetime_lbs",
+    "rp_claimed_lifetime",
 ]
 
 display_names = {
@@ -763,8 +784,14 @@ display_names = {
     "total_profit_loss_bb": "Profit/Loss (BB)",
     "win_rate_non_showdown_heads_up": "NSD Heads-Up WR (BB/100)",
     "win_rate_showdown_heads_up": "SD Heads-Up WR (BB/100)",
-    "rp_earned_day": "RP Earned (Day)", "rp_claimed_day": "RP Claimed (Day)",
-    "rp_earned_lifetime": "RP Earned (Lifetime)", "rp_claimed_lifetime": "RP Claimed (Lifetime)",
+    "rp_earned_day": "RP Earned (Day)",
+    "rp_earned_day_tourneys": "RP Earned - Tourneys (Day)",
+    "rp_earned_day_lbs": "RP Earned - LBs (Day)",
+    "rp_claimed_day": "RP Claimed (Day)",
+    "rp_earned_lifetime": "RP Earned (Lifetime)",
+    "rp_earned_lifetime_tourneys": "RP Earned - Tourneys (Lifetime)",
+    "rp_earned_lifetime_lbs": "RP Earned - LBs (Lifetime)",
+    "rp_claimed_lifetime": "RP Claimed (Lifetime)",
 }
 
 table_df = (
@@ -790,9 +817,11 @@ format_dict = {
     "Chip Dumping Score": "{:.2f}", "Win Rate (BB/100)": "{:.2f}",
     "Profit/Loss (BB)": "{:.2f}",
     "NSD Heads-Up WR (BB/100)": "{:.2f}", "SD Heads-Up WR (BB/100)": "{:.2f}",
-    "Median Hand Time (s)": "{:.1f}", "RP Earned (Day)": "{:,.0f}",
-    "RP Claimed (Day)": "{:,.0f}", "RP Earned (Lifetime)": "{:,.0f}",
-    "RP Claimed (Lifetime)": "{:,.0f}",
+    "Median Hand Time (s)": "{:.1f}",
+    "RP Earned (Day)": "{:,.0f}", "RP Earned - Tourneys (Day)": "{:,.0f}",
+    "RP Earned - LBs (Day)": "{:,.0f}", "RP Claimed (Day)": "{:,.0f}",
+    "RP Earned (Lifetime)": "{:,.0f}", "RP Earned - Tourneys (Lifetime)": "{:,.0f}",
+    "RP Earned - LBs (Lifetime)": "{:,.0f}", "RP Claimed (Lifetime)": "{:,.0f}",
 }
 
 styled = table_df.style.format(format_dict, na_rep="—").map(colour_level, subset=["Level"])
