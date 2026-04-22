@@ -278,8 +278,29 @@ def fetch_sessions(date_start: str, date_end: str) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["session_start"] = pd.to_datetime(df["session_start"])
     df["session_end"] = pd.to_datetime(df["session_end"])
-    df["session_date"] = df["session_start"].dt.date
     df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
+
+    # Re-aggregate sessions split across midnight boundaries.
+    # Weighted average for median_hand_time (exact for non-split sessions).
+    df["_mht_weighted"] = df["median_hand_time"] * df["total_hands"]
+
+    df = df.groupby(["session_id", "user_id"], as_index=False).agg({
+        "total_hands": "sum",
+        "low_opponent_hands": "sum",
+        "total_profit_loss_bb": "sum",
+        "sd_hu_hands": "sum",
+        "sd_hu_profit_bb": "sum",
+        "nsd_hu_hands": "sum",
+        "nsd_hu_profit_bb": "sum",
+        "_mht_weighted": "sum",
+        "session_start": "min",
+        "session_end": "max",
+    })
+
+    df["median_hand_time"] = df["_mht_weighted"] / df["total_hands"].replace(0, 1)
+    df.drop(columns=["_mht_weighted"], inplace=True)
+
+    df["session_date"] = df["session_start"].dt.date
     return df
 
 
