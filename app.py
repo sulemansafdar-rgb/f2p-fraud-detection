@@ -146,8 +146,10 @@ hand_details AS (
     JOIN hand_history hh ON hu.HAND_HISTORY_ID = hh.HAND_HISTORY_ID
          AND hu.TOURNAMENT_TYPE_ID = hh.TOURNAMENT_TYPE_ID
     WHERE hu.TOURNAMENT_TYPE_ID = 6
-      AND hu.CREATED_DATE >= '{date_start}' AND hu.CREATED_DATE < '{date_end}'
-      AND hh.CREATED_DATE >= '{date_start}' AND hh.CREATED_DATE < '{date_end}'
+      AND hu.CREATED_DATE >= DATE_SUB('{date_start}', INTERVAL 1 DAY)
+      AND hu.CREATED_DATE < DATE_ADD('{date_end}', INTERVAL 1 DAY)
+      AND hh.CREATED_DATE >= DATE_SUB('{date_start}', INTERVAL 1 DAY)
+      AND hh.CREATED_DATE < DATE_ADD('{date_end}', INTERVAL 1 DAY)
 ),
 hand_data AS (
     SELECT ga.USER_ID, ga.INTERNAL_REFERENCE_NO as session_id,
