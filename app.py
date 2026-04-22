@@ -5,6 +5,7 @@ Streamlit app with live Metabase data, configurable scoring, and RP enrichment.
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
 import math
 import time
@@ -232,6 +233,13 @@ WHERE tt.TRANSACTION_DESCRIPTION IN ('LeaderBoard Prize', 'TOURNAMENT_WIN')
 GROUP BY rp.USER_ID"""
 
 
+def username_sql(user_ids: str) -> str:
+    """Fetch usernames for given user IDs — DB 67."""
+    return f"""SELECT USER_ID as user_id, USER_NAME as username
+FROM user_master
+WHERE USER_ID IN ({user_ids})"""
+
+
 def rp_claimed_lifetime_sql(user_ids: str) -> str:
     """Lifetime RP claimed — scoped to relevant users only."""
     return f"""SELECT
@@ -340,6 +348,18 @@ def fetch_rp_lifetime(user_ids_list) -> tuple:
     return earned, claimed
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching usernames...")
+def fetch_usernames(user_ids_list) -> pd.DataFrame:
+    """Fetch usernames from user_master — DB 67."""
+    if not user_ids_list:
+        return pd.DataFrame(columns=["user_id", "username"])
+    user_ids_str = ",".join(str(uid) for uid in user_ids_list)
+    df = metabase_query(DB_MAIN, username_sql(user_ids_str))
+    if not df.empty:
+        df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
+    return df
+
+
 def enrich_with_rp(sessions: pd.DataFrame, date_start: str, date_end: str) -> pd.DataFrame:
     """Join RP data onto session data."""
     df = sessions.copy()
@@ -379,6 +399,14 @@ def enrich_with_rp(sessions: pd.DataFrame, date_start: str, date_end: str) -> pd
 
     for col in ["rp_earned_day", "rp_claimed_day", "rp_earned_lifetime", "rp_claimed_lifetime"]:
         df[col] = df[col].fillna(0)
+
+    # Fetch usernames
+    usernames = fetch_usernames(unique_users)
+    if not usernames.empty:
+        df = df.merge(usernames, on="user_id", how="left")
+    else:
+        df["username"] = ""
+    df["username"] = df["username"].fillna("")
 
     return df
 
@@ -519,7 +547,7 @@ if st.sidebar.button("🔄 Refresh data", help="Clear cache and re-fetch from DB
     st.cache_data.clear()
     st.rerun()
 
-st.sidebar.caption(f"Cache TTL: {CACHE_TTL // 60} minutes")
+st.sidebar.caption(f"ℹ️ Data is cached for {CACHE_TTL // 60} min after each fetch. Click Refresh to pull fresh data.")
 
 # --- Section 1: Score Config ---
 st.sidebar.header("1. Score Config")
@@ -690,22 +718,48 @@ metric_cols[3].metric("L3 Sessions", f"{(filtered['flag'] == 'L3').sum():,}")
 metric_cols[4].metric("Unique Users", f"{filtered['user_id'].nunique():,}")
 metric_cols[5].metric("Avg Score", f"{filtered['cdb_score'].mean():.2f}" if len(filtered) > 0 else "—")
 
+# --- Score Distribution (above table) ---
+if len(filtered) > 0:
+    st.divider()
+    dist_cols = st.columns(2)
+    with dist_cols[0]:
+        st.subheader("CBD Score Distribution")
+        scores = filtered["cdb_score"].dropna()
+        if len(scores) > 0:
+            # Create clean histogram bins: 0-0.5, 0.5-1.0, ... 9.5-10.0
+            bin_edges = np.arange(0, 10.5, 0.5)
+            counts, edges = np.histogram(scores, bins=bin_edges)
+            labels = [f"{edges[i]:.1f}–{edges[i+1]:.1f}" for i in range(len(counts))]
+            hist_df = pd.DataFrame({"Score Range": labels, "Sessions": counts})
+            st.bar_chart(hist_df, x="Score Range", y="Sessions")
+    with dist_cols[1]:
+        st.subheader("Level Distribution")
+        level_counts = filtered["flag"].value_counts().reindex(["L1", "L2", "L3", "L4", "L5"], fill_value=0)
+        level_df = pd.DataFrame({"Level": level_counts.index, "Sessions": level_counts.values})
+        st.bar_chart(level_df, x="Level", y="Sessions")
+
 st.divider()
 
 # --- Data table ---
 display_cols = [
-    "user_id", "cdb_score", "session_id", "flag", "win_rate", "median_hand_time",
-    "total_hands", "rp_earned_day", "rp_claimed_day", "rp_earned_lifetime",
-    "rp_claimed_lifetime", "session_date", "session_start", "session_end",
+    "username", "user_id", "flag", "cdb_score", "session_id",
+    "session_date", "session_start", "session_end",
+    "total_hands", "median_hand_time", "win_rate", "total_profit_loss_bb",
+    "win_rate_non_showdown_heads_up", "win_rate_showdown_heads_up",
+    "rp_earned_day", "rp_claimed_day", "rp_earned_lifetime", "rp_claimed_lifetime",
 ]
 
 display_names = {
-    "user_id": "User ID", "cdb_score": "Chip Dumping Score", "session_id": "Session ID",
-    "flag": "Level", "win_rate": "Win Rate (BB/100)", "median_hand_time": "Median Hand Time (s)",
-    "total_hands": "Total Hands", "rp_earned_day": "RP Earned (Day)",
-    "rp_claimed_day": "RP Claimed (Day)", "rp_earned_lifetime": "RP Earned (Lifetime)",
-    "rp_claimed_lifetime": "RP Claimed (Lifetime)", "session_date": "Session Date",
-    "session_start": "Session Start", "session_end": "Session End",
+    "username": "Username", "user_id": "User ID", "flag": "Level",
+    "cdb_score": "Chip Dumping Score", "session_id": "Session ID",
+    "session_date": "Session Date", "session_start": "Session Start",
+    "session_end": "Session End", "total_hands": "Total Hands",
+    "median_hand_time": "Median Hand Time (s)", "win_rate": "Win Rate (BB/100)",
+    "total_profit_loss_bb": "Profit/Loss (BB)",
+    "win_rate_non_showdown_heads_up": "NSD Heads-Up WR (BB/100)",
+    "win_rate_showdown_heads_up": "SD Heads-Up WR (BB/100)",
+    "rp_earned_day": "RP Earned (Day)", "rp_claimed_day": "RP Claimed (Day)",
+    "rp_earned_lifetime": "RP Earned (Lifetime)", "rp_claimed_lifetime": "RP Claimed (Lifetime)",
 }
 
 table_df = (
@@ -729,6 +783,8 @@ def colour_level(val):
 
 format_dict = {
     "Chip Dumping Score": "{:.2f}", "Win Rate (BB/100)": "{:.2f}",
+    "Profit/Loss (BB)": "{:.2f}",
+    "NSD Heads-Up WR (BB/100)": "{:.2f}", "SD Heads-Up WR (BB/100)": "{:.2f}",
     "Median Hand Time (s)": "{:.1f}", "RP Earned (Day)": "{:,.0f}",
     "RP Claimed (Day)": "{:,.0f}", "RP Earned (Lifetime)": "{:,.0f}",
     "RP Claimed (Lifetime)": "{:,.0f}",
@@ -749,13 +805,3 @@ st.download_button(
     data=csv_export, file_name="risky_sessions_filtered.csv", mime="text/csv",
 )
 
-# --- Score distribution ---
-with st.expander("📊 Score Distribution", expanded=False):
-    if len(filtered) > 0:
-        hist_cols = st.columns(2)
-        with hist_cols[0]:
-            st.subheader("CBD Score Distribution")
-            st.bar_chart(filtered["cdb_score"].dropna().value_counts(bins=20).sort_index())
-        with hist_cols[1]:
-            st.subheader("Level Distribution")
-            st.bar_chart(filtered["flag"].value_counts().reindex(["L1", "L2", "L3", "L4", "L5"], fill_value=0))
