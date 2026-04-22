@@ -28,6 +28,7 @@ METABASE_URL = st.secrets.get("METABASE_URL", "")
 METABASE_API_KEY = st.secrets.get("METABASE_API_KEY", "")
 DB_RING = int(st.secrets.get("DB_RING", 166))       # Ring hand-level data
 DB_MAIN = int(st.secrets.get("DB_MAIN", 67))        # Main DB (RP data)
+DB_TOURNEY = int(st.secrets.get("DB_TOURNEY", 100))  # Tournament data
 CACHE_TTL = int(st.secrets.get("CACHE_TTL", 3600))  # Default 1 hour
 
 if not METABASE_URL or not METABASE_API_KEY:
@@ -256,6 +257,87 @@ GROUP BY USER_ID"""
 
 
 # ============================================================
+# Drill-down SQL templates
+# ============================================================
+
+def lb_history_sql(user_id: int, date_start: str, date_end: str) -> str:
+    """Hourly LB placements for a user — join new_leaderboard for LB name/time window."""
+    return f"""SELECT
+  lth.LEADERBOARD_ID,
+  nl.NAME as lb_name,
+  nl.START_DATE as lb_start,
+  nl.END_DATE as lb_end,
+  lth.LEADERBOARD_RANK as lb_rank,
+  lth.AMOUNT as rp_prize,
+  lth.RELEASE_DATE
+FROM leaderboard_transaction_history lth
+INNER JOIN new_leaderboard nl ON lth.LEADERBOARD_ID = nl.LEADERBOARD_ID
+WHERE lth.USER_ID = {user_id}
+  AND lth.RELEASE_DATE >= '{date_start}'
+  AND lth.RELEASE_DATE < '{date_end}'
+ORDER BY lth.RELEASE_DATE DESC"""
+
+
+def coin_accumulation_sql(user_id: int, date_start: str, date_end: str) -> str:
+    """Per-session coin/rake accumulation from reward_points_leaderboard."""
+    return f"""SELECT
+  INTERNAL_REFERENCE_NO as session_id,
+  COUNT(*) as hands_played,
+  ROUND(SUM(TRANSACTION_AMOUNT), 2) as total_coins_earned,
+  ROUND(SUM(GROSS_TRANSACTION_AMOUNT), 2) as total_gross_coins,
+  MAX(BIG_BLIND) as big_blind,
+  MIN(TRANSACTION_DATE) as first_hand,
+  MAX(TRANSACTION_DATE) as last_hand
+FROM reward_points_leaderboard
+WHERE USER_ID = {user_id}
+  AND TRANSACTION_DATE >= '{date_start}'
+  AND TRANSACTION_DATE < '{date_end}'
+GROUP BY INTERNAL_REFERENCE_NO
+ORDER BY first_hand DESC"""
+
+
+def tourney_entries_sql(user_id: int, date_start: str, date_end: str) -> str:
+    """Tournament buy-ins and rebuys from master_transaction_history_playmoney (DB 67).
+    TRANSACTION_TYPE_ID 70 = TOURNAMENT_BUY_IN, 101 = TOURNAMENT_REBUY_IN, 79 = TOURNAMENT_WIN.
+    INTERNAL_REFERENCE_NO is a composite string containing the tournament ID."""
+    return f"""SELECT
+  INTERNAL_REFERENCE_NO as ref_no,
+  COUNT(CASE WHEN TRANSACTION_TYPE_ID = 70 THEN 1 END) as buy_ins,
+  COUNT(CASE WHEN TRANSACTION_TYPE_ID = 101 THEN 1 END) as rebuys,
+  SUM(CASE WHEN TRANSACTION_TYPE_ID IN (70, 101) THEN TRANSACTION_AMOUNT ELSE 0 END) as total_spent,
+  SUM(CASE WHEN TRANSACTION_TYPE_ID = 79 THEN TRANSACTION_AMOUNT ELSE 0 END) as chip_winnings,
+  MIN(TRANSACTION_DATE) as first_action,
+  MAX(TRANSACTION_DATE) as last_action
+FROM master_transaction_history_playmoney
+WHERE USER_ID = {user_id}
+  AND TRANSACTION_TYPE_ID IN (70, 79, 101)
+  AND TRANSACTION_DATE >= '{date_start}'
+  AND TRANSACTION_DATE < '{date_end}'
+GROUP BY INTERNAL_REFERENCE_NO
+ORDER BY first_action DESC"""
+
+
+def tourney_rp_results_sql(user_id: int, date_start: str, date_end: str) -> str:
+    """RP tournament results from tournament_rank_details + tournament_config (DB 100).
+    PRIZE_BALANCE_TYPE_ID = 3 filters for RP-prize tournaments only."""
+    return f"""SELECT
+  trd.TOURNAMENT_ID,
+  tc.TOURNAMENT_NAME,
+  tc.REGISTER_ENTRY_FEE as entry_fee,
+  tc.PRIZE_AMOUNT as prize_pool,
+  trd.RANKS as final_rank,
+  trd.PRIZE_AMOUNT as rp_prize_won,
+  trd.CREATED_DATE as result_date
+FROM tournament_rank_details trd
+JOIN tournament_config tc ON tc.ID = trd.TOURNAMENT_ID
+WHERE trd.USER_ID = {user_id}
+  AND tc.PRIZE_BALANCE_TYPE_ID = 3
+  AND DATE(trd.CREATED_DATE) >= '{date_start}'
+  AND DATE(trd.CREATED_DATE) < '{date_end}'
+ORDER BY trd.CREATED_DATE DESC"""
+
+
+# ============================================================
 # Data fetching with caching
 # ============================================================
 
@@ -368,6 +450,64 @@ def fetch_usernames(user_ids_list) -> pd.DataFrame:
         df["account_status"] = pd.to_numeric(df["account_status"], errors="coerce").fillna(0).astype(int)
         status_map = {1: "Active", 2: "Blocked"}
         df["account_status"] = df["account_status"].map(lambda v: status_map.get(v, f"Other ({v})"))
+    return df
+
+
+# ============================================================
+# Drill-down data fetching
+# ============================================================
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching LB history...")
+def fetch_lb_history(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
+    """Fetch hourly LB placements for a user."""
+    df = metabase_query(DB_MAIN, lb_history_sql(user_id, date_start, date_end))
+    if not df.empty:
+        df["lb_rank"] = pd.to_numeric(df["lb_rank"], errors="coerce").astype("Int64")
+        df["rp_prize"] = pd.to_numeric(df["rp_prize"], errors="coerce")
+        df["lb_start"] = pd.to_datetime(df["lb_start"])
+        df["lb_end"] = pd.to_datetime(df["lb_end"])
+        df["RELEASE_DATE"] = pd.to_datetime(df["RELEASE_DATE"])
+    return df
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching coin accumulation...")
+def fetch_coin_accumulation(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
+    """Fetch per-session coin/rake accumulation."""
+    df = metabase_query(DB_MAIN, coin_accumulation_sql(user_id, date_start, date_end))
+    if not df.empty:
+        df["hands_played"] = pd.to_numeric(df["hands_played"], errors="coerce").astype(int)
+        df["total_coins_earned"] = pd.to_numeric(df["total_coins_earned"], errors="coerce")
+        df["total_gross_coins"] = pd.to_numeric(df["total_gross_coins"], errors="coerce")
+        df["first_hand"] = pd.to_datetime(df["first_hand"])
+        df["last_hand"] = pd.to_datetime(df["last_hand"])
+    return df
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching tournament entries (DB 67)...")
+def fetch_tourney_entries(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
+    """Fetch tournament buy-ins / rebuys from master_transaction_history_playmoney."""
+    df = metabase_query(DB_MAIN, tourney_entries_sql(user_id, date_start, date_end))
+    if not df.empty:
+        for col in ["buy_ins", "rebuys"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        df["total_spent"] = pd.to_numeric(df["total_spent"], errors="coerce")
+        df["chip_winnings"] = pd.to_numeric(df["chip_winnings"], errors="coerce")
+        df["first_action"] = pd.to_datetime(df["first_action"])
+        df["last_action"] = pd.to_datetime(df["last_action"])
+    return df
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching RP tournament results (DB 100)...")
+def fetch_tourney_rp_results(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
+    """Fetch RP tournament rankings/prizes from tournament_rank_details + tournament_config."""
+    df = metabase_query(DB_TOURNEY, tourney_rp_results_sql(user_id, date_start, date_end))
+    if not df.empty:
+        df["TOURNAMENT_ID"] = pd.to_numeric(df["TOURNAMENT_ID"], errors="coerce").astype("Int64")
+        df["final_rank"] = pd.to_numeric(df["final_rank"], errors="coerce").astype("Int64")
+        df["rp_prize_won"] = pd.to_numeric(df["rp_prize_won"], errors="coerce")
+        df["entry_fee"] = pd.to_numeric(df["entry_fee"], errors="coerce")
+        df["prize_pool"] = pd.to_numeric(df["prize_pool"], errors="coerce")
+        df["result_date"] = pd.to_datetime(df["result_date"])
     return df
 
 
@@ -838,4 +978,231 @@ st.download_button(
     label="📥 Download filtered results as CSV",
     data=csv_export, file_name="risky_sessions_filtered.csv", mime="text/csv",
 )
+
+
+# ============================================================
+# USER DRILL-DOWN — Intent Investigation
+# ============================================================
+st.divider()
+st.header("🔎 User Drill-Down — Intent Investigation")
+st.caption(
+    "Select a flagged user to investigate chip dumping intent. "
+    "Route 1: LB farming (direct RP). Route 2: Tournament chip accumulation (indirect RP)."
+)
+
+# User selection — dropdown of flagged users from current filtered results
+flagged_users = (
+    filtered[filtered["flag"].isin(["L1", "L2", "L3"])]
+    .groupby("user_id")
+    .agg(
+        username=("username", "first"),
+        sessions=("session_id", "count"),
+        avg_score=("cdb_score", "mean"),
+        max_flag=("flag", "min"),  # L1 < L2 < L3 alphabetically, so min = worst
+    )
+    .sort_values("avg_score", ascending=False)
+    .reset_index()
+)
+
+if flagged_users.empty:
+    st.info("No L1/L2/L3 flagged users in the current filtered results. Adjust filters above to see flagged users.")
+else:
+    user_options = {
+        row["user_id"]: f"{row['username']} ({row['user_id']}) — {row['max_flag']} · {row['sessions']} sessions · avg {row['avg_score']:.1f}"
+        for _, row in flagged_users.iterrows()
+    }
+    selected_user_id = st.selectbox(
+        "Select User to Investigate",
+        options=list(user_options.keys()),
+        format_func=lambda uid: user_options[uid],
+        key="drilldown_user",
+    )
+
+    if selected_user_id:
+        # Show user summary from main table
+        user_sessions = filtered[filtered["user_id"] == selected_user_id].sort_values("cdb_score", ascending=False)
+        user_info = flagged_users[flagged_users["user_id"] == selected_user_id].iloc[0]
+
+        st.subheader(f"User: {user_info['username']} ({selected_user_id})")
+
+        # User-level summary metrics
+        u_cols = st.columns(6)
+        u_cols[0].metric("Flagged Sessions", f"{len(user_sessions):,}")
+        u_cols[1].metric("Worst Level", user_info["max_flag"])
+        u_cols[2].metric("Avg CBD Score", f"{user_info['avg_score']:.2f}")
+        u_cols[3].metric("Total Hands", f"{user_sessions['total_hands'].sum():,}")
+        rp_day_total = user_sessions["rp_earned_day"].sum()
+        u_cols[4].metric("RP Earned (Period)", f"{rp_day_total:,.0f}")
+        rp_life = user_sessions["rp_earned_lifetime"].iloc[0] if len(user_sessions) > 0 else 0
+        u_cols[5].metric("RP Earned (Lifetime)", f"{rp_life:,.0f}")
+
+        # ---- ROUTE 1: Leaderboard Farming ----
+        st.markdown("---")
+        st.subheader("📊 Route 1 — Leaderboard Farming (Direct RP)")
+        st.caption(
+            "Chip dumping → wins hands → wagers bigger → accumulates more coins/rake per hand "
+            "→ ranks higher on hourly LB → earns RP prize from LB payout"
+        )
+
+        r1_tab1, r1_tab2 = st.tabs(["🏆 LB Placements & Prizes", "💰 Coin Accumulation per Session"])
+
+        with r1_tab1:
+            lb_df = fetch_lb_history(selected_user_id, date_start, date_end)
+            if lb_df.empty:
+                st.info("No LB placements found for this user in the selected period.")
+            else:
+                # Summary metrics
+                lb_m = st.columns(5)
+                lb_m[0].metric("LB Placements", f"{len(lb_df):,}")
+                lb_m[1].metric("Total RP from LBs", f"{lb_df['rp_prize'].sum():,.1f}")
+                lb_m[2].metric("Best Rank", f"#{lb_df['lb_rank'].min()}")
+                lb_m[3].metric("Avg Rank", f"#{lb_df['lb_rank'].mean():.1f}")
+                top1_count = (lb_df["lb_rank"] == 1).sum()
+                lb_m[4].metric("#1 Finishes", f"{top1_count}")
+
+                # LB breakdown by type
+                lb_by_type = lb_df.groupby("lb_name").agg(
+                    placements=("LEADERBOARD_ID", "count"),
+                    total_rp=("rp_prize", "sum"),
+                    avg_rank=("lb_rank", "mean"),
+                    best_rank=("lb_rank", "min"),
+                ).reset_index().sort_values("total_rp", ascending=False)
+                lb_by_type.columns = ["LB Type", "Placements", "Total RP", "Avg Rank", "Best Rank"]
+
+                st.markdown("**LB Performance by Type**")
+                st.dataframe(
+                    lb_by_type.style.format({
+                        "Total RP": "{:,.1f}", "Avg Rank": "{:.1f}",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+
+                # Full LB placement history
+                with st.expander("Full LB Placement History", expanded=False):
+                    lb_display = lb_df[["lb_name", "lb_start", "lb_end", "lb_rank", "rp_prize"]].copy()
+                    lb_display.columns = ["LB Type", "LB Start", "LB End", "Rank", "RP Prize"]
+                    st.dataframe(
+                        lb_display.style.format({"RP Prize": "{:,.2f}"}),
+                        use_container_width=True, hide_index=True, height=400,
+                    )
+
+        with r1_tab2:
+            coin_df = fetch_coin_accumulation(selected_user_id, date_start, date_end)
+            if coin_df.empty:
+                st.info("No coin accumulation data found for this user in the selected period.")
+            else:
+                c_m = st.columns(4)
+                c_m[0].metric("Sessions with Coins", f"{len(coin_df):,}")
+                c_m[1].metric("Total Coins Earned", f"{coin_df['total_coins_earned'].sum():,.0f}")
+                c_m[2].metric("Total Hands (Coin)", f"{coin_df['hands_played'].sum():,}")
+                avg_coins_per_hand = coin_df["total_coins_earned"].sum() / max(coin_df["hands_played"].sum(), 1)
+                c_m[3].metric("Avg Coins/Hand", f"{avg_coins_per_hand:,.2f}")
+
+                coin_display = coin_df[["session_id", "hands_played", "total_coins_earned",
+                                        "total_gross_coins", "big_blind", "first_hand", "last_hand"]].copy()
+                coin_display.columns = ["Session ID", "Hands", "Coins Earned", "Gross Coins",
+                                        "Big Blind", "First Hand", "Last Hand"]
+                st.dataframe(
+                    coin_display.style.format({
+                        "Coins Earned": "{:,.2f}", "Gross Coins": "{:,.2f}",
+                    }),
+                    use_container_width=True, hide_index=True, height=400,
+                )
+
+        # ---- ROUTE 2: Tournament Farming ----
+        st.markdown("---")
+        st.subheader("🎰 Route 2 — Tournament Farming (Indirect RP)")
+        st.caption(
+            "Chip dumping → accumulates chips beyond organic sources → enters multiple RP tournaments "
+            "with heavy rebuys → maximises chances to rank ITM → earns RP prizes from tournament payouts"
+        )
+
+        # Fetch from two sources
+        entries_df = fetch_tourney_entries(selected_user_id, date_start, date_end)
+        rp_results_df = fetch_tourney_rp_results(selected_user_id, date_start, date_end)
+
+        has_entries = not entries_df.empty
+        has_results = not rp_results_df.empty
+
+        if not has_entries and not has_results:
+            st.info("No tournament activity found for this user in the selected period.")
+        else:
+            # --- Tab 1: Entry / Rebuy Activity (DB 67) ---
+            # --- Tab 2: RP Tournament Results (DB 100) ---
+            t2_tab1, t2_tab2 = st.tabs(["📥 Entry & Rebuy Activity", "🏆 RP Tournament Results"])
+
+            with t2_tab1:
+                if not has_entries:
+                    st.info("No tournament buy-ins or rebuys found in the selected period.")
+                else:
+                    # Summary metrics
+                    t_m = st.columns(5)
+                    total_tourneys = len(entries_df)
+                    total_buyins = entries_df["buy_ins"].sum()
+                    total_rebuys = entries_df["rebuys"].sum()
+                    total_spent = entries_df["total_spent"].sum()
+                    total_chip_win = entries_df["chip_winnings"].sum()
+                    t_m[0].metric("Tournaments", f"{total_tourneys:,}")
+                    t_m[1].metric("Buy-ins", f"{total_buyins:,}")
+                    t_m[2].metric("Rebuys", f"{total_rebuys:,}")
+                    t_m[3].metric("Total Chips Spent", f"{total_spent:,.0f}")
+                    t_m[4].metric("Chip Winnings", f"{total_chip_win:,.0f}")
+
+                    entries_display = entries_df[[
+                        "ref_no", "buy_ins", "rebuys", "total_spent",
+                        "chip_winnings", "first_action", "last_action",
+                    ]].copy()
+                    entries_display.columns = [
+                        "Reference", "Buy-ins", "Rebuys", "Chips Spent",
+                        "Chip Winnings", "First Action", "Last Action",
+                    ]
+                    st.dataframe(
+                        entries_display.style.format({
+                            "Chips Spent": "{:,.0f}", "Chip Winnings": "{:,.0f}",
+                        }),
+                        use_container_width=True, hide_index=True, height=400,
+                    )
+
+                    # Heavy rebuy flag
+                    heavy_rebuy = entries_df[entries_df["rebuys"] >= 3]
+                    if not heavy_rebuy.empty:
+                        st.markdown(f"**⚠️ Heavy Rebuy Tournaments (≥3 rebuys): {len(heavy_rebuy)}**")
+                        heavy_display = heavy_rebuy[["ref_no", "rebuys", "total_spent", "chip_winnings"]].copy()
+                        heavy_display.columns = ["Reference", "Rebuys", "Chips Spent", "Chip Winnings"]
+                        st.dataframe(
+                            heavy_display.style.format({"Chips Spent": "{:,.0f}", "Chip Winnings": "{:,.0f}"}),
+                            use_container_width=True, hide_index=True,
+                        )
+
+            with t2_tab2:
+                if not has_results:
+                    st.info("No RP tournament results found in the selected period.")
+                else:
+                    # RP results summary
+                    r_m = st.columns(5)
+                    rp_tourney_count = len(rp_results_df)
+                    itm_count = rp_results_df["rp_prize_won"].notna().sum()
+                    total_rp = rp_results_df["rp_prize_won"].fillna(0).sum()
+                    avg_rank = rp_results_df["final_rank"].mean()
+                    best_rank = rp_results_df["final_rank"].min()
+                    r_m[0].metric("RP Tournaments Played", f"{rp_tourney_count:,}")
+                    r_m[1].metric("ITM Finishes", f"{itm_count:,}")
+                    r_m[2].metric("Total RP Won", f"{total_rp:,.0f}")
+                    r_m[3].metric("Avg Rank", f"{avg_rank:.1f}" if pd.notna(avg_rank) else "—")
+                    r_m[4].metric("Best Rank", f"{best_rank}" if pd.notna(best_rank) else "—")
+
+                    rp_display = rp_results_df[[
+                        "TOURNAMENT_NAME", "TOURNAMENT_ID", "entry_fee", "prize_pool",
+                        "final_rank", "rp_prize_won", "result_date",
+                    ]].copy()
+                    rp_display.columns = [
+                        "Tournament", "ID", "Entry Fee", "Prize Pool",
+                        "Rank", "RP Won", "Date",
+                    ]
+                    st.dataframe(
+                        rp_display.style.format({
+                            "Entry Fee": "{:,.0f}", "Prize Pool": "{:,.0f}", "RP Won": "{:,.0f}",
+                        }, na_rep="—"),
+                        use_container_width=True, hide_index=True, height=400,
+                    )
 
