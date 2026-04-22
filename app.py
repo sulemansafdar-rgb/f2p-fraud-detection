@@ -235,7 +235,7 @@ GROUP BY rp.USER_ID"""
 
 def username_sql(user_ids: str) -> str:
     """Fetch usernames for given user IDs — DB 67."""
-    return f"""SELECT USER_ID as user_id, USER_NAME as username
+    return f"""SELECT USER_ID as user_id, USERNAME as username
 FROM user
 WHERE USER_ID IN ({user_ids})"""
 
