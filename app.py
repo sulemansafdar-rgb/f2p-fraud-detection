@@ -235,7 +235,7 @@ GROUP BY rp.USER_ID"""
 
 def username_sql(user_ids: str) -> str:
     """Fetch usernames for given user IDs — DB 67."""
-    return f"""SELECT USER_ID as user_id, USERNAME as username
+    return f"""SELECT USER_ID as user_id, USERNAME as username, ACCOUNT_STATUS as account_status
 FROM user
 WHERE USER_ID IN ({user_ids})"""
 
@@ -357,6 +357,9 @@ def fetch_usernames(user_ids_list) -> pd.DataFrame:
     df = metabase_query(DB_MAIN, username_sql(user_ids_str))
     if not df.empty:
         df["user_id"] = pd.to_numeric(df["user_id"], errors="coerce").astype("Int64")
+        df["account_status"] = pd.to_numeric(df["account_status"], errors="coerce").fillna(0).astype(int)
+        status_map = {1: "Active", 2: "Blocked"}
+        df["account_status"] = df["account_status"].map(lambda v: status_map.get(v, f"Other ({v})"))
     return df
 
 
@@ -406,7 +409,9 @@ def enrich_with_rp(sessions: pd.DataFrame, date_start: str, date_end: str) -> pd
         df = df.merge(usernames, on="user_id", how="left")
     else:
         df["username"] = ""
+        df["account_status"] = ""
     df["username"] = df["username"].fillna("")
+    df["account_status"] = df["account_status"].fillna("")
 
     return df
 
@@ -742,7 +747,7 @@ st.divider()
 
 # --- Data table ---
 display_cols = [
-    "username", "user_id", "flag", "cdb_score", "session_id",
+    "username", "user_id", "account_status", "flag", "cdb_score", "session_id",
     "session_date", "session_start", "session_end",
     "total_hands", "median_hand_time", "win_rate", "total_profit_loss_bb",
     "win_rate_non_showdown_heads_up", "win_rate_showdown_heads_up",
@@ -750,7 +755,7 @@ display_cols = [
 ]
 
 display_names = {
-    "username": "Username", "user_id": "User ID", "flag": "Level",
+    "username": "Username", "user_id": "User ID", "account_status": "Account Status", "flag": "Level",
     "cdb_score": "Chip Dumping Score", "session_id": "Session ID",
     "session_date": "Session Date", "session_start": "Session Start",
     "session_end": "Session End", "total_hands": "Total Hands",
