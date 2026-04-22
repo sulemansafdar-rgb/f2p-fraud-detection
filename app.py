@@ -73,6 +73,7 @@ def metabase_query(database_id: int, sql: str) -> pd.DataFrame:
         "database": database_id,
         "type": "native",
         "native": {"query": sql},
+        "constraints": {"max-results": 1000000, "max-results-bare-rows": 1000000},
     }
     try:
         resp = requests.post(
