@@ -41,6 +41,29 @@ CACHE_TTL = 3600
     """, language="toml")
     st.stop()
 
+# --- Quick connectivity check ---
+@st.cache_data(ttl=CACHE_TTL)
+def _test_metabase_connection():
+    """Test Metabase API connectivity on startup."""
+    url = METABASE_URL.rstrip("/")
+    try:
+        resp = requests.get(f"{url}/api/user/current", headers={"x-api-key": METABASE_API_KEY}, timeout=15)
+        if resp.status_code == 200:
+            return True, "Connected"
+        elif resp.status_code in (401, 403):
+            return False, f"Auth failed (HTTP {resp.status_code}). Check METABASE_API_KEY."
+        else:
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except requests.exceptions.ConnectionError:
+        return False, f"Cannot reach {url}. Check METABASE_URL."
+    except requests.exceptions.Timeout:
+        return False, f"Connection to {url} timed out (15s)."
+
+_mb_ok, _mb_msg = _test_metabase_connection()
+if not _mb_ok:
+    st.error(f"❌ Metabase connection failed: {_mb_msg}")
+    st.stop()
+
 
 def metabase_query(database_id: int, sql: str) -> pd.DataFrame:
     """Execute a native SQL query against Metabase and return a DataFrame."""
