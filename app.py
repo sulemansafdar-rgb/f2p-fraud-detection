@@ -239,10 +239,38 @@ GROUP BY rp.USER_ID"""
 
 
 def username_sql(user_ids: str) -> str:
-    """Fetch usernames for given user IDs — DB 67."""
-    return f"""SELECT USER_ID as user_id, USERNAME as username, ACCOUNT_STATUS as account_status
-FROM user
-WHERE USER_ID IN ({user_ids})"""
+    """Fetch usernames and profile info for given user IDs — DB 67."""
+    return f"""SELECT
+  u.USER_ID as user_id,
+  u.USERNAME as username,
+  u.ACCOUNT_STATUS as account_status,
+  u.DATE_OF_BIRTH as date_of_birth,
+  MIN(t.DATE_TIME) as first_login,
+  DATEDIFF(CURDATE(), MIN(t.DATE_TIME)) as days_since_first_login
+FROM user u
+LEFT JOIN tracking t ON t.USER_ID = u.USER_ID
+WHERE u.USER_ID IN ({user_ids})
+GROUP BY u.USER_ID, u.USERNAME, u.ACCOUNT_STATUS, u.DATE_OF_BIRTH"""
+
+
+def lifetime_engagement_sql(user_ids: str) -> str:
+    """Lifetime hands played from user_turnover_report_daily_playmoney — DB 67."""
+    return f"""SELECT
+  USER_ID as user_id,
+  SUM(NUMBER_OF_HANDS) as lifetime_hands
+FROM user_turnover_report_daily_playmoney
+WHERE USER_ID IN ({user_ids})
+GROUP BY USER_ID"""
+
+
+def lifetime_tourneys_sql(user_ids: str) -> str:
+    """Lifetime tournaments played from tournament_rank_details — DB 100."""
+    return f"""SELECT
+  USER_ID as user_id,
+  COUNT(DISTINCT TOURNAMENT_ID) as lifetime_tourneys
+FROM tournament_rank_details
+WHERE USER_ID IN ({user_ids})
+GROUP BY USER_ID"""
 
 
 def rp_claimed_lifetime_sql(user_ids: str) -> str:
@@ -410,7 +438,7 @@ def fetch_rp_lifetime(user_ids_list) -> tuple:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching usernames...")
 def fetch_usernames(user_ids_list) -> pd.DataFrame:
-    """Fetch usernames from user_master — DB 67."""
+    """Fetch usernames and profile info from user + tracking — DB 67."""
     if not user_ids_list:
         return pd.DataFrame(columns=["user_id", "username"])
     user_ids_str = ",".join(str(uid) for uid in user_ids_list)
@@ -420,6 +448,30 @@ def fetch_usernames(user_ids_list) -> pd.DataFrame:
         df["account_status"] = pd.to_numeric(df["account_status"], errors="coerce").fillna(0).astype(int)
         status_map = {1: "Active", 2: "Blocked"}
         df["account_status"] = df["account_status"].map(lambda v: status_map.get(v, f"Other ({v})"))
+        df["date_of_birth"] = pd.to_datetime(df["date_of_birth"], errors="coerce")
+        df["user_age"] = df["date_of_birth"].apply(
+            lambda dob: int((pd.Timestamp.now() - dob).days / 365.25) if pd.notna(dob) else None
+        )
+        df["first_login"] = pd.to_datetime(df["first_login"], errors="coerce")
+        df["days_since_first_login"] = pd.to_numeric(df["days_since_first_login"], errors="coerce").astype("Int64")
+    # Lifetime engagement — hands (DB 67)
+    eng_df = metabase_query(DB_MAIN, lifetime_engagement_sql(user_ids_str))
+    if not eng_df.empty:
+        eng_df["user_id"] = pd.to_numeric(eng_df["user_id"], errors="coerce").astype("Int64")
+        eng_df["lifetime_hands"] = pd.to_numeric(eng_df["lifetime_hands"], errors="coerce").astype("Int64")
+        df = df.merge(eng_df, on="user_id", how="left")
+    else:
+        df["lifetime_hands"] = 0
+    # Lifetime engagement — tourneys (DB 100)
+    tourney_df = metabase_query(DB_TOURNEY, lifetime_tourneys_sql(user_ids_str))
+    if not tourney_df.empty:
+        tourney_df["user_id"] = pd.to_numeric(tourney_df["user_id"], errors="coerce").astype("Int64")
+        tourney_df["lifetime_tourneys"] = pd.to_numeric(tourney_df["lifetime_tourneys"], errors="coerce").astype("Int64")
+        df = df.merge(tourney_df, on="user_id", how="left")
+    else:
+        df["lifetime_tourneys"] = 0
+    df["lifetime_hands"] = df["lifetime_hands"].fillna(0).astype("Int64")
+    df["lifetime_tourneys"] = df["lifetime_tourneys"].fillna(0).astype("Int64")
     return df
 
 
@@ -860,10 +912,12 @@ st.divider()
 
 # --- Data table ---
 display_cols = [
-    "username", "user_id", "account_status", "flag", "cdb_score", "session_id",
+    "username", "user_id", "account_status", "first_login", "days_since_first_login",
+    "flag", "cdb_score", "session_id",
     "session_date", "session_start", "session_end",
     "total_hands", "median_hand_time", "win_rate", "total_profit_loss_bb",
     "win_rate_non_showdown_heads_up", "win_rate_showdown_heads_up",
+    "lifetime_hands", "lifetime_tourneys",
     "rp_earned_day", "rp_earned_day_tourneys", "rp_earned_day_lbs",
     "rp_claimed_day",
     "rp_earned_lifetime", "rp_earned_lifetime_tourneys", "rp_earned_lifetime_lbs",
@@ -871,7 +925,9 @@ display_cols = [
 ]
 
 display_names = {
-    "username": "Username", "user_id": "User ID", "account_status": "Account Status", "flag": "Level",
+    "username": "Username", "user_id": "User ID", "account_status": "Account Status",
+    "first_login": "First Login", "days_since_first_login": "Days Since First Login",
+    "flag": "Level",
     "cdb_score": "Chip Dumping Score", "session_id": "Session ID",
     "session_date": "Session Date", "session_start": "Session Start",
     "session_end": "Session End", "total_hands": "Total Hands",
@@ -879,6 +935,7 @@ display_names = {
     "total_profit_loss_bb": "Profit/Loss (BB)",
     "win_rate_non_showdown_heads_up": "NSD Heads-Up WR (BB/100)",
     "win_rate_showdown_heads_up": "SD Heads-Up WR (BB/100)",
+    "lifetime_hands": "Lifetime Hands", "lifetime_tourneys": "Lifetime Tourneys",
     "rp_earned_day": "RP Earned (Day)",
     "rp_earned_day_tourneys": "RP Earned - Tourneys (Day)",
     "rp_earned_day_lbs": "RP Earned - LBs (Day)",
