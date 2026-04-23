@@ -278,22 +278,6 @@ WHERE lth.USER_ID = {user_id}
 ORDER BY lth.RELEASE_DATE DESC"""
 
 
-def coin_accumulation_sql(user_id: int, date_start: str, date_end: str) -> str:
-    """Per-session coin/rake accumulation from reward_points_leaderboard."""
-    return f"""SELECT
-  INTERNAL_REFERENCE_NO as session_id,
-  COUNT(*) as hands_played,
-  ROUND(SUM(TRANSACTION_AMOUNT), 2) as total_coins_earned,
-  ROUND(SUM(GROSS_TRANSACTION_AMOUNT), 2) as total_gross_coins,
-  MAX(BIG_BLIND) as big_blind,
-  MIN(TRANSACTION_DATE) as first_hand,
-  MAX(TRANSACTION_DATE) as last_hand
-FROM reward_points_leaderboard
-WHERE USER_ID = {user_id}
-  AND TRANSACTION_DATE >= '{date_start}'
-  AND TRANSACTION_DATE < '{date_end}'
-GROUP BY INTERNAL_REFERENCE_NO
-ORDER BY first_hand DESC"""
 
 
 def tourney_entries_sql(user_id: int, date_start: str, date_end: str) -> str:
@@ -470,17 +454,6 @@ def fetch_lb_history(user_id: int, date_start: str, date_end: str) -> pd.DataFra
     return df
 
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching coin accumulation...")
-def fetch_coin_accumulation(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
-    """Fetch per-session coin/rake accumulation."""
-    df = metabase_query(DB_MAIN, coin_accumulation_sql(user_id, date_start, date_end))
-    if not df.empty:
-        df["hands_played"] = pd.to_numeric(df["hands_played"], errors="coerce").astype(int)
-        df["total_coins_earned"] = pd.to_numeric(df["total_coins_earned"], errors="coerce")
-        df["total_gross_coins"] = pd.to_numeric(df["total_gross_coins"], errors="coerce")
-        df["first_hand"] = pd.to_datetime(df["first_hand"])
-        df["last_hand"] = pd.to_datetime(df["last_hand"])
-    return df
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching tournament entries (DB 67)...")
@@ -1011,11 +984,13 @@ else:
         row["user_id"]: f"{row['username']} ({row['user_id']}) — {row['max_flag']} · {row['sessions']} sessions · avg {row['avg_score']:.1f}"
         for _, row in flagged_users.iterrows()
     }
+    st.markdown("### 🔎 Select a Flagged User to Investigate")
     selected_user_id = st.selectbox(
-        "Select User to Investigate",
+        "Pick a user from the flagged list below",
         options=list(user_options.keys()),
         format_func=lambda uid: user_options[uid],
         key="drilldown_user",
+        label_visibility="collapsed",
     )
 
     if selected_user_id:
@@ -1044,68 +1019,42 @@ else:
             "→ ranks higher on hourly LB → earns RP prize from LB payout"
         )
 
-        r1_tab1, r1_tab2 = st.tabs(["🏆 LB Placements & Prizes", "💰 Coin Accumulation per Session"])
+        lb_df = fetch_lb_history(selected_user_id, date_start, date_end)
+        if lb_df.empty:
+            st.info("No LB results found for this user in the selected period.")
+        else:
+            # Summary metrics
+            lb_m = st.columns(5)
+            lb_m[0].metric("Hourly LBs Entered", f"{len(lb_df):,}")
+            lb_m[1].metric("Total RP from LBs", f"{lb_df['rp_prize'].sum():,.1f}")
+            lb_m[2].metric("Best Rank", f"#{lb_df['lb_rank'].min()}")
+            lb_m[3].metric("Avg Rank", f"#{lb_df['lb_rank'].mean():.1f}")
+            top1_count = (lb_df["lb_rank"] == 1).sum()
+            lb_m[4].metric("#1 Finishes", f"{top1_count}")
 
-        with r1_tab1:
-            lb_df = fetch_lb_history(selected_user_id, date_start, date_end)
-            if lb_df.empty:
-                st.info("No LB placements found for this user in the selected period.")
-            else:
-                # Summary metrics
-                lb_m = st.columns(5)
-                lb_m[0].metric("LB Placements", f"{len(lb_df):,}")
-                lb_m[1].metric("Total RP from LBs", f"{lb_df['rp_prize'].sum():,.1f}")
-                lb_m[2].metric("Best Rank", f"#{lb_df['lb_rank'].min()}")
-                lb_m[3].metric("Avg Rank", f"#{lb_df['lb_rank'].mean():.1f}")
-                top1_count = (lb_df["lb_rank"] == 1).sum()
-                lb_m[4].metric("#1 Finishes", f"{top1_count}")
+            # LB breakdown by type
+            lb_by_type = lb_df.groupby("lb_name").agg(
+                placements=("LEADERBOARD_ID", "count"),
+                total_rp=("rp_prize", "sum"),
+                avg_rank=("lb_rank", "mean"),
+                best_rank=("lb_rank", "min"),
+            ).reset_index().sort_values("total_rp", ascending=False)
+            lb_by_type.columns = ["LB Type", "Times Entered", "Total RP", "Avg Rank", "Best Rank"]
 
-                # LB breakdown by type
-                lb_by_type = lb_df.groupby("lb_name").agg(
-                    placements=("LEADERBOARD_ID", "count"),
-                    total_rp=("rp_prize", "sum"),
-                    avg_rank=("lb_rank", "mean"),
-                    best_rank=("lb_rank", "min"),
-                ).reset_index().sort_values("total_rp", ascending=False)
-                lb_by_type.columns = ["LB Type", "Placements", "Total RP", "Avg Rank", "Best Rank"]
+            st.markdown("**LB Performance by Type**")
+            st.dataframe(
+                lb_by_type.style.format({
+                    "Total RP": "{:,.1f}", "Avg Rank": "{:.1f}",
+                }),
+                use_container_width=True, hide_index=True,
+            )
 
-                st.markdown("**LB Performance by Type**")
+            # Full LB placement history
+            with st.expander("Full LB Placement History", expanded=False):
+                lb_display = lb_df[["lb_name", "lb_start", "lb_end", "lb_rank", "rp_prize"]].copy()
+                lb_display.columns = ["LB Type", "LB Start", "LB End", "Rank", "RP Prize"]
                 st.dataframe(
-                    lb_by_type.style.format({
-                        "Total RP": "{:,.1f}", "Avg Rank": "{:.1f}",
-                    }),
-                    use_container_width=True, hide_index=True,
-                )
-
-                # Full LB placement history
-                with st.expander("Full LB Placement History", expanded=False):
-                    lb_display = lb_df[["lb_name", "lb_start", "lb_end", "lb_rank", "rp_prize"]].copy()
-                    lb_display.columns = ["LB Type", "LB Start", "LB End", "Rank", "RP Prize"]
-                    st.dataframe(
-                        lb_display.style.format({"RP Prize": "{:,.2f}"}),
-                        use_container_width=True, hide_index=True, height=400,
-                    )
-
-        with r1_tab2:
-            coin_df = fetch_coin_accumulation(selected_user_id, date_start, date_end)
-            if coin_df.empty:
-                st.info("No coin accumulation data found for this user in the selected period.")
-            else:
-                c_m = st.columns(4)
-                c_m[0].metric("Sessions with Coins", f"{len(coin_df):,}")
-                c_m[1].metric("Total Coins Earned", f"{coin_df['total_coins_earned'].sum():,.0f}")
-                c_m[2].metric("Total Hands (Coin)", f"{coin_df['hands_played'].sum():,}")
-                avg_coins_per_hand = coin_df["total_coins_earned"].sum() / max(coin_df["hands_played"].sum(), 1)
-                c_m[3].metric("Avg Coins/Hand", f"{avg_coins_per_hand:,.2f}")
-
-                coin_display = coin_df[["session_id", "hands_played", "total_coins_earned",
-                                        "total_gross_coins", "big_blind", "first_hand", "last_hand"]].copy()
-                coin_display.columns = ["Session ID", "Hands", "Coins Earned", "Gross Coins",
-                                        "Big Blind", "First Hand", "Last Hand"]
-                st.dataframe(
-                    coin_display.style.format({
-                        "Coins Earned": "{:,.2f}", "Gross Coins": "{:,.2f}",
-                    }),
+                    lb_display.style.format({"RP Prize": "{:,.2f}"}),
                     use_container_width=True, hide_index=True, height=400,
                 )
 
