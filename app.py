@@ -10,7 +10,6 @@ import requests
 import math
 import time
 from datetime import date, timedelta
-from streamlit_pivot import st_pivot_table
 
 # ============================================================
 # Page config
@@ -1031,21 +1030,37 @@ with table_view:
         st.session_state.pop("_clicked_user", None)
 
 with pivot_view:
-    st.caption("Interactive pivot table — drag and drop fields, filter, sort, and export.")
-    st_pivot_table(
-        table_df,
-        key="risky_sessions_pivot",
-        rows=["Username", "Level"],
-        values=["Chip Dumping Score", "Total Hands", "RP Earned (Day)", "RP Earned (Lifetime)"],
-        aggregation={
+    st.caption("User-level summary — aggregated from session data. Click column headers to sort.")
+    pivot_rows = st.multiselect(
+        "Group by", ["Username", "Level", "Account Status", "Session Date"],
+        default=["Username"], key="pivot_group_by",
+    )
+    if pivot_rows:
+        pivot_df = table_df.groupby(pivot_rows, dropna=False).agg({
             "Chip Dumping Score": "mean",
             "Total Hands": "sum",
+            "Session ID": "count",
             "RP Earned (Day)": "sum",
             "RP Earned (Lifetime)": "max",
-        },
-        show_totals=True,
-        interactive=True,
-    )
+            "Lifetime Hands": "max",
+            "Lifetime Tourneys": "max",
+        }).rename(columns={"Session ID": "Sessions", "Chip Dumping Score": "Avg CBD Score"}).reset_index()
+        pivot_df = pivot_df.sort_values("Avg CBD Score", ascending=False)
+        st.dataframe(
+            pivot_df,
+            use_container_width=True, hide_index=True, height=500,
+            column_config={
+                "Avg CBD Score": st.column_config.NumberColumn(format="%.2f"),
+                "Total Hands": st.column_config.NumberColumn(format="%d"),
+                "Sessions": st.column_config.NumberColumn(format="%d"),
+                "RP Earned (Day)": st.column_config.NumberColumn(format="%.0f"),
+                "RP Earned (Lifetime)": st.column_config.NumberColumn(format="%.0f"),
+                "Lifetime Hands": st.column_config.NumberColumn(format="%d"),
+                "Lifetime Tourneys": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+    else:
+        st.info("Select at least one field to group by.")
 
 # --- Download ---
 csv_export = table_df.to_csv(index=False)
