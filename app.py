@@ -1040,8 +1040,15 @@ else:
         u_cols[1].metric("Worst Level", user_info["max_flag"])
         u_cols[2].metric("Avg CBD Score", f"{user_info['avg_score']:.2f}")
         u_cols[3].metric("Total Hands", f"{user_sessions['total_hands'].sum():,}")
-        rp_day_total = user_sessions["rp_earned_day"].sum()
-        u_cols[4].metric("RP Earned (Period)", f"{rp_day_total:,.0f}")
+        # Fetch period RP directly from source to avoid enrichment join duplicates
+        _rp_period_df = metabase_query(DB_MAIN, f"""SELECT ROUND(SUM(rp.TRANSACTION_AMOUNT), 2) as total_rp
+FROM master_transaction_history_baazirewardpoints rp
+INNER JOIN transaction_type tt ON rp.TRANSACTION_TYPE_ID = tt.TRANSACTION_TYPE_ID
+WHERE tt.TRANSACTION_DESCRIPTION IN ('LeaderBoard Prize', 'TOURNAMENT_WIN')
+  AND rp.USER_ID = {selected_user_id}
+  AND rp.TRANSACTION_DATE >= '{date_start}' AND rp.TRANSACTION_DATE < '{date_end}'""")
+        rp_period = float(_rp_period_df.iloc[0, 0]) if not _rp_period_df.empty and _rp_period_df.iloc[0, 0] else 0
+        u_cols[4].metric("RP Earned (Date Range)", f"{rp_period:,.0f}")
         rp_life = user_sessions["rp_earned_lifetime"].iloc[0] if len(user_sessions) > 0 else 0
         u_cols[5].metric("RP Earned (Lifetime)", f"{rp_life:,.0f}")
 
