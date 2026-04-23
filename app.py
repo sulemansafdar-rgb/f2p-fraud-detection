@@ -963,8 +963,14 @@ table_selection = st.dataframe(
 # If a row is clicked, pre-select that user in the drill-down
 if table_selection and table_selection.selection and table_selection.selection.rows:
     clicked_row_idx = table_selection.selection.rows[0]
-    clicked_uid = int(table_df.iloc[clicked_row_idx]["User ID"])
-    st.session_state["_clicked_user"] = clicked_uid
+    clicked_row = table_df.iloc[clicked_row_idx]
+    clicked_uid = int(clicked_row["User ID"])
+    clicked_level = clicked_row["Level"]
+    if clicked_level in ("L1", "L2", "L3"):
+        st.session_state["_clicked_user"] = clicked_uid
+    else:
+        st.session_state.pop("_clicked_user", None)
+        st.info(f"User {clicked_uid} is {clicked_level} — drill-down is available for L1/L2/L3 flagged users only.")
 else:
     st.session_state.pop("_clicked_user", None)
 
@@ -1010,14 +1016,12 @@ else:
     st.markdown("### 🔎 Select a Flagged User to Investigate")
     user_ids_list = list(user_options.keys())
     # Auto-select user if clicked from the table above
-    default_idx = 0
-    clicked_uid = st.session_state.get("_clicked_user")
+    clicked_uid = st.session_state.pop("_clicked_user", None)
     if clicked_uid and clicked_uid in user_ids_list:
-        default_idx = user_ids_list.index(clicked_uid)
+        st.session_state["drilldown_user"] = clicked_uid
     selected_user_id = st.selectbox(
         "Pick a user from the flagged list below",
         options=user_ids_list,
-        index=default_idx,
         format_func=lambda uid: user_options[uid],
         key="drilldown_user",
         label_visibility="collapsed",
@@ -1137,14 +1141,8 @@ else:
                 "Tournament", "ID", "Prize Pool (RP)",
                 "Buy-ins", "Rebuys", "Rank", "RP Won", "Date",
             ]
-            t_filtered = apply_column_filters(t_display, {
-                "Tournament": "multiselect",
-                "Rebuys": "min_max",
-                "Rank": "min_max",
-            }, key_prefix="tourney_filter")
-            st.caption(f"Showing {len(t_filtered)} of {len(t_display)} tournaments")
             st.dataframe(
-                t_filtered,
+                t_display,
                 use_container_width=True, hide_index=True, height=400,
                 column_config={
                     "Prize Pool (RP)": st.column_config.NumberColumn(format="%.0f"),
