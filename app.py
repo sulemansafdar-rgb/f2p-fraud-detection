@@ -10,6 +10,7 @@ import requests
 import math
 import time
 from datetime import date, timedelta
+from streamlit_pivot import st_pivot_table
 
 # ============================================================
 # Page config
@@ -842,13 +843,13 @@ with filter_cols[1]:
         [l for l in filtered["flag"].dropna().unique()],
         key=lambda x: int(x[1]) if x and len(x) == 2 else 99,
     )
-    selected_level = st.selectbox("Level", level_options, key="level_filter")
+    selected_level = st.selectbox("Level", level_options, key="level_filter", filter_mode="search")
 
 with filter_cols[2]:
     acct_status_options = ["All"] + sorted(
         [s for s in filtered["account_status"].dropna().unique().tolist()]
     )
-    selected_acct_status = st.selectbox("Account Status", acct_status_options, key="acct_status_filter")
+    selected_acct_status = st.selectbox("Account Status", acct_status_options, key="acct_status_filter", filter_mode="search")
 
 with filter_cols[3]:
     user_search = st.text_input("User ID Search", key="user_search", placeholder="Enter User ID...")
@@ -1000,31 +1001,51 @@ def apply_column_filters(df: pd.DataFrame, filter_cols: dict, key_prefix: str) -
     return filtered
 
 
-styled = table_df.style.format(format_dict, na_rep="—").map(colour_level, subset=["Level"])
+table_view, pivot_view = st.tabs(["📋 Table View", "📊 Pivot View"])
 
-table_selection = st.dataframe(
-    styled, width="stretch", height=600, hide_index=True,
-    on_select="rerun", selection_mode="single-row",
-    column_config={
-        "User ID": st.column_config.NumberColumn(format="%d"),
-        "Session ID": st.column_config.TextColumn(),
-        "Total Hands": st.column_config.NumberColumn(format="%d"),
-    },
-)
+with table_view:
+    styled = table_df.style.format(format_dict, na_rep="—").map(colour_level, subset=["Level"])
 
-# If a row is clicked, pre-select that user in the drill-down
-if table_selection and table_selection.selection and table_selection.selection.rows:
-    clicked_row_idx = table_selection.selection.rows[0]
-    clicked_row = table_df.iloc[clicked_row_idx]
-    clicked_uid = int(clicked_row["User ID"])
-    clicked_level = clicked_row["Level"]
-    if clicked_level in ("L1", "L2", "L3"):
-        st.session_state["_clicked_user"] = clicked_uid
+    table_selection = st.dataframe(
+        styled, width="stretch", height=600, hide_index=True,
+        on_select="rerun", selection_mode="single-row",
+        column_config={
+            "User ID": st.column_config.NumberColumn(format="%d"),
+            "Session ID": st.column_config.TextColumn(),
+            "Total Hands": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+
+    # If a row is clicked, pre-select that user in the drill-down
+    if table_selection and table_selection.selection and table_selection.selection.rows:
+        clicked_row_idx = table_selection.selection.rows[0]
+        clicked_row = table_df.iloc[clicked_row_idx]
+        clicked_uid = int(clicked_row["User ID"])
+        clicked_level = clicked_row["Level"]
+        if clicked_level in ("L1", "L2", "L3"):
+            st.session_state["_clicked_user"] = clicked_uid
+        else:
+            st.session_state.pop("_clicked_user", None)
+            st.info(f"User {clicked_uid} is {clicked_level} — drill-down is available for L1/L2/L3 flagged users only.")
     else:
         st.session_state.pop("_clicked_user", None)
-        st.info(f"User {clicked_uid} is {clicked_level} — drill-down is available for L1/L2/L3 flagged users only.")
-else:
-    st.session_state.pop("_clicked_user", None)
+
+with pivot_view:
+    st.caption("Interactive pivot table — drag and drop fields, filter, sort, and export.")
+    st_pivot_table(
+        table_df,
+        key="risky_sessions_pivot",
+        rows=["Username", "Level"],
+        values=["Chip Dumping Score", "Total Hands", "RP Earned (Day)", "RP Earned (Lifetime)"],
+        aggregation={
+            "Chip Dumping Score": "mean",
+            "Total Hands": "sum",
+            "RP Earned (Day)": "sum",
+            "RP Earned (Lifetime)": "max",
+        },
+        show_totals=True,
+        interactive=True,
+    )
 
 # --- Download ---
 csv_export = table_df.to_csv(index=False)
@@ -1077,6 +1098,7 @@ else:
         format_func=lambda uid: user_options[uid],
         key="drilldown_user",
         label_visibility="collapsed",
+        filter_mode="search",
     )
 
     if selected_user_id:
