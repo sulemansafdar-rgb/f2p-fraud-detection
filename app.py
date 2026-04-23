@@ -280,38 +280,24 @@ ORDER BY lth.RELEASE_DATE DESC"""
 
 
 
-def tourney_entries_sql(user_id: int, date_start: str, date_end: str) -> str:
-    """Tournament buy-ins and rebuys from master_transaction_history_playmoney (DB 67).
-    TRANSACTION_TYPE_ID 70 = TOURNAMENT_BUY_IN, 101 = TOURNAMENT_REBUY_IN, 79 = TOURNAMENT_WIN.
-    INTERNAL_REFERENCE_NO is a composite string containing the tournament ID."""
-    return f"""SELECT
-  INTERNAL_REFERENCE_NO as ref_no,
-  COUNT(CASE WHEN TRANSACTION_TYPE_ID = 70 THEN 1 END) as buy_ins,
-  COUNT(CASE WHEN TRANSACTION_TYPE_ID = 101 THEN 1 END) as rebuys,
-  SUM(CASE WHEN TRANSACTION_TYPE_ID IN (70, 101) THEN TRANSACTION_AMOUNT ELSE 0 END) as total_spent,
-  SUM(CASE WHEN TRANSACTION_TYPE_ID = 79 THEN TRANSACTION_AMOUNT ELSE 0 END) as chip_winnings,
-  MIN(TRANSACTION_DATE) as first_action,
-  MAX(TRANSACTION_DATE) as last_action
-FROM master_transaction_history_playmoney
-WHERE USER_ID = {user_id}
-  AND TRANSACTION_TYPE_ID IN (70, 79, 101)
-  AND TRANSACTION_DATE >= '{date_start}'
-  AND TRANSACTION_DATE < '{date_end}'
-GROUP BY INTERNAL_REFERENCE_NO
-ORDER BY first_action DESC"""
-
-
-def tourney_rp_results_sql(user_id: int, date_start: str, date_end: str) -> str:
-    """RP tournament results from tournament_rank_details + tournament_config (DB 100).
+def tournament_activity_sql(user_id: int, date_start: str, date_end: str) -> str:
+    """RP tournament activity: results from tournament_rank_details + tournament_config (DB 100),
+    with buy-in/rebuy counts from user_tournament_chip_balance via subqueries.
     PRIZE_BALANCE_TYPE_ID = 3 filters for RP-prize tournaments only."""
     return f"""SELECT
-  trd.TOURNAMENT_ID,
+  tc.ID as tournament_id,
   tc.TOURNAMENT_NAME,
   tc.REGISTER_ENTRY_FEE as entry_fee,
   tc.PRIZE_AMOUNT as prize_pool,
   trd.RANKS as final_rank,
   trd.PRIZE_AMOUNT as rp_prize_won,
-  trd.CREATED_DATE as result_date
+  trd.CREATED_DATE as result_date,
+  (SELECT COUNT(*) FROM user_tournament_chip_balance utcb
+   WHERE utcb.TOURNAMENT_ID = tc.ID AND utcb.USER_ID = trd.USER_ID
+   AND utcb.EVENT_TYPE_ID IN (1, 3)) as buy_ins,
+  (SELECT COUNT(*) FROM user_tournament_chip_balance utcb
+   WHERE utcb.TOURNAMENT_ID = tc.ID AND utcb.USER_ID = trd.USER_ID
+   AND utcb.EVENT_TYPE_ID = 5) as rebuys
 FROM tournament_rank_details trd
 JOIN tournament_config tc ON tc.ID = trd.TOURNAMENT_ID
 WHERE trd.USER_ID = {user_id}
@@ -456,30 +442,18 @@ def fetch_lb_history(user_id: int, date_start: str, date_end: str) -> pd.DataFra
 
 
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching tournament entries (DB 67)...")
-def fetch_tourney_entries(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
-    """Fetch tournament buy-ins / rebuys from master_transaction_history_playmoney."""
-    df = metabase_query(DB_MAIN, tourney_entries_sql(user_id, date_start, date_end))
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching RP tournament activity...")
+def fetch_tournament_activity(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
+    """Fetch RP tournament results with buy-in/rebuy counts (DB 100)."""
+    df = metabase_query(DB_TOURNEY, tournament_activity_sql(user_id, date_start, date_end))
     if not df.empty:
-        for col in ["buy_ins", "rebuys"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-        df["total_spent"] = pd.to_numeric(df["total_spent"], errors="coerce")
-        df["chip_winnings"] = pd.to_numeric(df["chip_winnings"], errors="coerce")
-        df["first_action"] = pd.to_datetime(df["first_action"])
-        df["last_action"] = pd.to_datetime(df["last_action"])
-    return df
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching RP tournament results (DB 100)...")
-def fetch_tourney_rp_results(user_id: int, date_start: str, date_end: str) -> pd.DataFrame:
-    """Fetch RP tournament rankings/prizes from tournament_rank_details + tournament_config."""
-    df = metabase_query(DB_TOURNEY, tourney_rp_results_sql(user_id, date_start, date_end))
-    if not df.empty:
-        df["TOURNAMENT_ID"] = pd.to_numeric(df["TOURNAMENT_ID"], errors="coerce").astype("Int64")
+        df["tournament_id"] = pd.to_numeric(df["tournament_id"], errors="coerce").astype("Int64")
         df["final_rank"] = pd.to_numeric(df["final_rank"], errors="coerce").astype("Int64")
         df["rp_prize_won"] = pd.to_numeric(df["rp_prize_won"], errors="coerce")
         df["entry_fee"] = pd.to_numeric(df["entry_fee"], errors="coerce")
         df["prize_pool"] = pd.to_numeric(df["prize_pool"], errors="coerce")
+        for col in ["buy_ins", "rebuys"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
         df["result_date"] = pd.to_datetime(df["result_date"])
     return df
 
@@ -1043,10 +1017,14 @@ else:
 
             st.markdown("**LB Performance by Type**")
             st.dataframe(
-                lb_by_type.style.format({
-                    "Total RP": "{:,.1f}", "Avg Rank": "{:.1f}",
-                }),
+                lb_by_type,
                 use_container_width=True, hide_index=True,
+                column_config={
+                    "Total RP": st.column_config.NumberColumn(format="%.1f"),
+                    "Avg Rank": st.column_config.NumberColumn(format="%.1f"),
+                    "Times Entered": st.column_config.NumberColumn(format="%d"),
+                    "Best Rank": st.column_config.NumberColumn(format="%d"),
+                },
             )
 
             # Full LB placement history
@@ -1054,8 +1032,12 @@ else:
                 lb_display = lb_df[["lb_name", "lb_start", "lb_end", "lb_rank", "rp_prize"]].copy()
                 lb_display.columns = ["LB Type", "LB Start", "LB End", "Rank", "RP Prize"]
                 st.dataframe(
-                    lb_display.style.format({"RP Prize": "{:,.2f}"}),
+                    lb_display,
                     use_container_width=True, hide_index=True, height=400,
+                    column_config={
+                        "RP Prize": st.column_config.NumberColumn(format="%.2f"),
+                        "Rank": st.column_config.NumberColumn(format="%d"),
+                    },
                 )
 
         # ---- ROUTE 2: Tournament Farming ----
@@ -1066,92 +1048,59 @@ else:
             "with heavy rebuys → maximises chances to rank ITM → earns RP prizes from tournament payouts"
         )
 
-        # Fetch from two sources
-        entries_df = fetch_tourney_entries(selected_user_id, date_start, date_end)
-        rp_results_df = fetch_tourney_rp_results(selected_user_id, date_start, date_end)
+        tourney_df = fetch_tournament_activity(selected_user_id, date_start, date_end)
 
-        has_entries = not entries_df.empty
-        has_results = not rp_results_df.empty
-
-        if not has_entries and not has_results:
-            st.info("No tournament activity found for this user in the selected period.")
+        if tourney_df.empty:
+            st.info("No RP tournament activity found for this user in the selected period.")
         else:
-            # --- Tab 1: Entry / Rebuy Activity (DB 67) ---
-            # --- Tab 2: RP Tournament Results (DB 100) ---
-            t2_tab1, t2_tab2 = st.tabs(["📥 Entry & Rebuy Activity", "🏆 RP Tournament Results"])
+            # Summary metrics
+            t_m = st.columns(6)
+            t_m[0].metric("RP Tournaments", f"{len(tourney_df):,}")
+            t_m[1].metric("Total Rebuys", f"{tourney_df['rebuys'].sum():,}")
+            itm_count = tourney_df["rp_prize_won"].notna().sum()
+            t_m[2].metric("ITM Finishes", f"{itm_count:,}")
+            total_rp = tourney_df["rp_prize_won"].fillna(0).sum()
+            t_m[3].metric("Total RP Won", f"{total_rp:,.0f}")
+            avg_rank = tourney_df["final_rank"].mean()
+            t_m[4].metric("Avg Rank", f"{avg_rank:.1f}" if pd.notna(avg_rank) else "—")
+            avg_rebuys = tourney_df["rebuys"].mean()
+            t_m[5].metric("Avg Rebuys/Tourney", f"{avg_rebuys:.1f}")
 
-            with t2_tab1:
-                if not has_entries:
-                    st.info("No tournament buy-ins or rebuys found in the selected period.")
-                else:
-                    # Summary metrics
-                    t_m = st.columns(5)
-                    total_tourneys = len(entries_df)
-                    total_buyins = entries_df["buy_ins"].sum()
-                    total_rebuys = entries_df["rebuys"].sum()
-                    total_spent = entries_df["total_spent"].sum()
-                    total_chip_win = entries_df["chip_winnings"].sum()
-                    t_m[0].metric("Tournaments", f"{total_tourneys:,}")
-                    t_m[1].metric("Buy-ins", f"{total_buyins:,}")
-                    t_m[2].metric("Rebuys", f"{total_rebuys:,}")
-                    t_m[3].metric("Total Chips Spent", f"{total_spent:,.0f}")
-                    t_m[4].metric("Chip Winnings", f"{total_chip_win:,.0f}")
+            # Tournament detail table
+            t_display = tourney_df[[
+                "TOURNAMENT_NAME", "tournament_id", "prize_pool",
+                "buy_ins", "rebuys", "final_rank", "rp_prize_won", "result_date",
+            ]].copy()
+            t_display.columns = [
+                "Tournament", "ID", "Prize Pool (RP)",
+                "Buy-ins", "Rebuys", "Rank", "RP Won", "Date",
+            ]
+            st.dataframe(
+                t_display,
+                use_container_width=True, hide_index=True, height=400,
+                column_config={
+                    "Prize Pool (RP)": st.column_config.NumberColumn(format="%.0f"),
+                    "RP Won": st.column_config.NumberColumn(format="%.0f"),
+                    "Buy-ins": st.column_config.NumberColumn(format="%d"),
+                    "Rebuys": st.column_config.NumberColumn(format="%d"),
+                    "Rank": st.column_config.NumberColumn(format="%d"),
+                    "ID": st.column_config.NumberColumn(format="%d"),
+                },
+            )
 
-                    entries_display = entries_df[[
-                        "ref_no", "buy_ins", "rebuys", "total_spent",
-                        "chip_winnings", "first_action", "last_action",
-                    ]].copy()
-                    entries_display.columns = [
-                        "Reference", "Buy-ins", "Rebuys", "Chips Spent",
-                        "Chip Winnings", "First Action", "Last Action",
-                    ]
-                    st.dataframe(
-                        entries_display.style.format({
-                            "Chips Spent": "{:,.0f}", "Chip Winnings": "{:,.0f}",
-                        }),
-                        use_container_width=True, hide_index=True, height=400,
-                    )
-
-                    # Heavy rebuy flag
-                    heavy_rebuy = entries_df[entries_df["rebuys"] >= 3]
-                    if not heavy_rebuy.empty:
-                        st.markdown(f"**⚠️ Heavy Rebuy Tournaments (≥3 rebuys): {len(heavy_rebuy)}**")
-                        heavy_display = heavy_rebuy[["ref_no", "rebuys", "total_spent", "chip_winnings"]].copy()
-                        heavy_display.columns = ["Reference", "Rebuys", "Chips Spent", "Chip Winnings"]
-                        st.dataframe(
-                            heavy_display.style.format({"Chips Spent": "{:,.0f}", "Chip Winnings": "{:,.0f}"}),
-                            use_container_width=True, hide_index=True,
-                        )
-
-            with t2_tab2:
-                if not has_results:
-                    st.info("No RP tournament results found in the selected period.")
-                else:
-                    # RP results summary
-                    r_m = st.columns(5)
-                    rp_tourney_count = len(rp_results_df)
-                    itm_count = rp_results_df["rp_prize_won"].notna().sum()
-                    total_rp = rp_results_df["rp_prize_won"].fillna(0).sum()
-                    avg_rank = rp_results_df["final_rank"].mean()
-                    best_rank = rp_results_df["final_rank"].min()
-                    r_m[0].metric("RP Tournaments Played", f"{rp_tourney_count:,}")
-                    r_m[1].metric("ITM Finishes", f"{itm_count:,}")
-                    r_m[2].metric("Total RP Won", f"{total_rp:,.0f}")
-                    r_m[3].metric("Avg Rank", f"{avg_rank:.1f}" if pd.notna(avg_rank) else "—")
-                    r_m[4].metric("Best Rank", f"{best_rank}" if pd.notna(best_rank) else "—")
-
-                    rp_display = rp_results_df[[
-                        "TOURNAMENT_NAME", "TOURNAMENT_ID", "entry_fee", "prize_pool",
-                        "final_rank", "rp_prize_won", "result_date",
-                    ]].copy()
-                    rp_display.columns = [
-                        "Tournament", "ID", "Entry Fee", "Prize Pool",
-                        "Rank", "RP Won", "Date",
-                    ]
-                    st.dataframe(
-                        rp_display.style.format({
-                            "Entry Fee": "{:,.0f}", "Prize Pool": "{:,.0f}", "RP Won": "{:,.0f}",
-                        }, na_rep="—"),
-                        use_container_width=True, hide_index=True, height=400,
-                    )
+            # Heavy rebuy flag
+            heavy_rebuy = tourney_df[tourney_df["rebuys"] >= 3]
+            if not heavy_rebuy.empty:
+                st.markdown(f"**⚠️ Heavy Rebuy Tournaments (≥3 rebuys): {len(heavy_rebuy)}**")
+                heavy_display = heavy_rebuy[["TOURNAMENT_NAME", "rebuys", "final_rank", "rp_prize_won"]].copy()
+                heavy_display.columns = ["Tournament", "Rebuys", "Rank", "RP Won"]
+                st.dataframe(
+                    heavy_display,
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "RP Won": st.column_config.NumberColumn(format="%.0f"),
+                        "Rebuys": st.column_config.NumberColumn(format="%d"),
+                        "Rank": st.column_config.NumberColumn(format="%d"),
+                    },
+                )
 
