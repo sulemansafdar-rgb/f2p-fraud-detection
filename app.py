@@ -778,7 +778,7 @@ if score_not_null:
     filtered = filtered[filtered["cdb_score"].notna()]
 
 # --- Top filter bar ---
-filter_cols = st.columns([2, 1.5, 1.5, 1.5])
+filter_cols = st.columns([2, 1.2, 1.2, 1.2, 1.5])
 
 with filter_cols[0]:
     available_dates = sorted(filtered["session_date"].dropna().unique())
@@ -798,9 +798,15 @@ with filter_cols[1]:
     selected_level = st.selectbox("Level", level_options, key="level_filter")
 
 with filter_cols[2]:
-    user_search = st.text_input("User ID Search", key="user_search", placeholder="Enter User ID...")
+    acct_status_options = ["All"] + sorted(
+        [s for s in filtered["account_status"].dropna().unique().tolist()]
+    )
+    selected_acct_status = st.selectbox("Account Status", acct_status_options, key="acct_status_filter")
 
 with filter_cols[3]:
+    user_search = st.text_input("User ID Search", key="user_search", placeholder="Enter User ID...")
+
+with filter_cols[4]:
     fraud_status = st.selectbox(
         "RP Activity", ["All", "Has RP Activity", "No RP Activity"], key="fraud_status",
     )
@@ -812,6 +818,8 @@ if date_range and isinstance(date_range, tuple) and len(date_range) == 2:
     ]
 if selected_level != "All":
     filtered = filtered[filtered["flag"] == selected_level]
+if selected_acct_status != "All":
+    filtered = filtered[filtered["account_status"] == selected_acct_status]
 if user_search:
     filtered = filtered[filtered["user_id"].astype(str).str.contains(user_search, na=False)]
 if fraud_status == "Has RP Activity":
@@ -942,7 +950,7 @@ def apply_column_filters(df: pd.DataFrame, filter_cols: dict, key_prefix: str) -
 
 styled = table_df.style.format(format_dict, na_rep="—").map(colour_level, subset=["Level"])
 
-st.dataframe(styled, width="stretch", height=600, column_config={
+st.dataframe(styled, width="stretch", height=600, hide_index=True, column_config={
     "User ID": st.column_config.NumberColumn(format="%d"),
     "Session ID": st.column_config.TextColumn(),
     "Total Hands": st.column_config.NumberColumn(format="%d"),
