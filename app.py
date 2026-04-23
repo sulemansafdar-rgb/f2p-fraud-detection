@@ -950,11 +950,23 @@ def apply_column_filters(df: pd.DataFrame, filter_cols: dict, key_prefix: str) -
 
 styled = table_df.style.format(format_dict, na_rep="—").map(colour_level, subset=["Level"])
 
-st.dataframe(styled, width="stretch", height=600, hide_index=True, column_config={
-    "User ID": st.column_config.NumberColumn(format="%d"),
-    "Session ID": st.column_config.TextColumn(),
-    "Total Hands": st.column_config.NumberColumn(format="%d"),
-})
+table_selection = st.dataframe(
+    styled, width="stretch", height=600, hide_index=True,
+    on_select="rerun", selection_mode="single-row",
+    column_config={
+        "User ID": st.column_config.NumberColumn(format="%d"),
+        "Session ID": st.column_config.TextColumn(),
+        "Total Hands": st.column_config.NumberColumn(format="%d"),
+    },
+)
+
+# If a row is clicked, pre-select that user in the drill-down
+if table_selection and table_selection.selection and table_selection.selection.rows:
+    clicked_row_idx = table_selection.selection.rows[0]
+    clicked_uid = int(table_df.iloc[clicked_row_idx]["User ID"])
+    st.session_state["_clicked_user"] = clicked_uid
+else:
+    st.session_state.pop("_clicked_user", None)
 
 # --- Download ---
 csv_export = table_df.to_csv(index=False)
@@ -996,9 +1008,16 @@ else:
         for _, row in flagged_users.iterrows()
     }
     st.markdown("### 🔎 Select a Flagged User to Investigate")
+    user_ids_list = list(user_options.keys())
+    # Auto-select user if clicked from the table above
+    default_idx = 0
+    clicked_uid = st.session_state.get("_clicked_user")
+    if clicked_uid and clicked_uid in user_ids_list:
+        default_idx = user_ids_list.index(clicked_uid)
     selected_user_id = st.selectbox(
         "Pick a user from the flagged list below",
-        options=list(user_options.keys()),
+        options=user_ids_list,
+        index=default_idx,
         format_func=lambda uid: user_options[uid],
         key="drilldown_user",
         label_visibility="collapsed",
