@@ -1091,14 +1091,8 @@ else:
             with st.expander("Full LB Placement History", expanded=False):
                 lb_display = lb_df[["lb_name", "lb_start", "lb_end", "lb_rank", "rp_prize"]].copy()
                 lb_display.columns = ["LB Type", "LB Start", "LB End", "Rank", "RP Prize"]
-                lb_filtered = apply_column_filters(lb_display, {
-                    "LB Type": "multiselect",
-                    "Rank": "min_max",
-                    "RP Prize": "min_max",
-                }, key_prefix="lb_filter")
-                st.caption(f"Showing {len(lb_filtered)} of {len(lb_display)} placements")
                 st.dataframe(
-                    lb_filtered,
+                    lb_display,
                     use_container_width=True, hide_index=True, height=400,
                     column_config={
                         "RP Prize": st.column_config.NumberColumn(format="%.2f"),
