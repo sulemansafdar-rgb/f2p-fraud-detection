@@ -911,6 +911,35 @@ format_dict = {
     "RP Earned - LBs (Lifetime)": "{:,.0f}", "RP Claimed (Lifetime)": "{:,.0f}",
 }
 
+def apply_column_filters(df: pd.DataFrame, filter_cols: dict, key_prefix: str) -> pd.DataFrame:
+    """Render column-specific filter widgets and return the filtered DataFrame.
+
+    filter_cols: dict mapping display column name → filter type.
+      - "multiselect": multiselect from unique values (for categorical columns)
+      - "min_max": two number inputs for min/max range (for numeric columns)
+    """
+    filtered = df.copy()
+    cols = st.columns(len(filter_cols))
+    for i, (col_name, ftype) in enumerate(filter_cols.items()):
+        if col_name not in filtered.columns:
+            continue
+        with cols[i]:
+            if ftype == "multiselect":
+                options = sorted(filtered[col_name].dropna().unique().tolist())
+                selected = st.multiselect(col_name, options, default=options, key=f"{key_prefix}_{col_name}")
+                if selected:
+                    filtered = filtered[filtered[col_name].isin(selected)]
+            elif ftype == "min_max":
+                col_min = float(filtered[col_name].min()) if not filtered[col_name].isna().all() else 0.0
+                col_max = float(filtered[col_name].max()) if not filtered[col_name].isna().all() else 0.0
+                v_min, v_max = st.slider(
+                    col_name, min_value=col_min, max_value=col_max,
+                    value=(col_min, col_max), key=f"{key_prefix}_{col_name}",
+                )
+                filtered = filtered[(filtered[col_name] >= v_min) & (filtered[col_name] <= v_max)]
+    return filtered
+
+
 styled = table_df.style.format(format_dict, na_rep="—").map(colour_level, subset=["Level"])
 
 st.dataframe(styled, width="stretch", height=600, column_config={
@@ -1031,8 +1060,14 @@ else:
             with st.expander("Full LB Placement History", expanded=False):
                 lb_display = lb_df[["lb_name", "lb_start", "lb_end", "lb_rank", "rp_prize"]].copy()
                 lb_display.columns = ["LB Type", "LB Start", "LB End", "Rank", "RP Prize"]
+                lb_filtered = apply_column_filters(lb_display, {
+                    "LB Type": "multiselect",
+                    "Rank": "min_max",
+                    "RP Prize": "min_max",
+                }, key_prefix="lb_filter")
+                st.caption(f"Showing {len(lb_filtered)} of {len(lb_display)} placements")
                 st.dataframe(
-                    lb_display,
+                    lb_filtered,
                     use_container_width=True, hide_index=True, height=400,
                     column_config={
                         "RP Prize": st.column_config.NumberColumn(format="%.2f"),
@@ -1066,7 +1101,7 @@ else:
             avg_rebuys = tourney_df["rebuys"].mean()
             t_m[5].metric("Avg Rebuys/Tourney", f"{avg_rebuys:.1f}")
 
-            # Tournament detail table
+            # Tournament detail table with filters
             t_display = tourney_df[[
                 "TOURNAMENT_NAME", "tournament_id", "prize_pool",
                 "buy_ins", "rebuys", "final_rank", "rp_prize_won", "result_date",
@@ -1075,8 +1110,14 @@ else:
                 "Tournament", "ID", "Prize Pool (RP)",
                 "Buy-ins", "Rebuys", "Rank", "RP Won", "Date",
             ]
+            t_filtered = apply_column_filters(t_display, {
+                "Tournament": "multiselect",
+                "Rebuys": "min_max",
+                "Rank": "min_max",
+            }, key_prefix="tourney_filter")
+            st.caption(f"Showing {len(t_filtered)} of {len(t_display)} tournaments")
             st.dataframe(
-                t_display,
+                t_filtered,
                 use_container_width=True, hide_index=True, height=400,
                 column_config={
                     "Prize Pool (RP)": st.column_config.NumberColumn(format="%.0f"),
