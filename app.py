@@ -244,13 +244,12 @@ def username_sql(user_ids: str) -> str:
   u.USER_ID as user_id,
   u.USERNAME as username,
   u.ACCOUNT_STATUS as account_status,
-  u.DATE_OF_BIRTH as date_of_birth,
   MIN(t.DATE_TIME) as first_login,
   DATEDIFF(CURDATE(), MIN(t.DATE_TIME)) as days_since_first_login
 FROM user u
 LEFT JOIN tracking t ON t.USER_ID = u.USER_ID
 WHERE u.USER_ID IN ({user_ids})
-GROUP BY u.USER_ID, u.USERNAME, u.ACCOUNT_STATUS, u.DATE_OF_BIRTH"""
+GROUP BY u.USER_ID, u.USERNAME, u.ACCOUNT_STATUS"""
 
 
 def lifetime_engagement_sql(user_ids: str) -> str:
@@ -448,10 +447,6 @@ def fetch_usernames(user_ids_list) -> pd.DataFrame:
         df["account_status"] = pd.to_numeric(df["account_status"], errors="coerce").fillna(0).astype(int)
         status_map = {1: "Active", 2: "Blocked"}
         df["account_status"] = df["account_status"].map(lambda v: status_map.get(v, f"Other ({v})"))
-        df["date_of_birth"] = pd.to_datetime(df["date_of_birth"], errors="coerce")
-        df["user_age"] = df["date_of_birth"].apply(
-            lambda dob: int((pd.Timestamp.now() - dob).days / 365.25) if pd.notna(dob) else None
-        )
         df["first_login"] = pd.to_datetime(df["first_login"], errors="coerce")
         df["days_since_first_login"] = pd.to_numeric(df["days_since_first_login"], errors="coerce").astype("Int64")
     # Lifetime engagement — hands (DB 67)
