@@ -842,13 +842,13 @@ with filter_cols[1]:
         [l for l in filtered["flag"].dropna().unique()],
         key=lambda x: int(x[1]) if x and len(x) == 2 else 99,
     )
-    selected_level = st.selectbox("Level", level_options, key="level_filter", filter_mode="search")
+    selected_level = st.selectbox("Level", level_options, key="level_filter")
 
 with filter_cols[2]:
     acct_status_options = ["All"] + sorted(
         [s for s in filtered["account_status"].dropna().unique().tolist()]
     )
-    selected_acct_status = st.selectbox("Account Status", acct_status_options, key="acct_status_filter", filter_mode="search")
+    selected_acct_status = st.selectbox("Account Status", acct_status_options, key="acct_status_filter")
 
 with filter_cols[3]:
     user_search = st.text_input("User ID Search", key="user_search", placeholder="Enter User ID...")
@@ -1113,7 +1113,6 @@ else:
         format_func=lambda uid: user_options[uid],
         key="drilldown_user",
         label_visibility="collapsed",
-        filter_mode="search",
     )
 
     if selected_user_id:
